@@ -4,7 +4,7 @@
 
 ## Features
 
-- [] Cross Platform (linux with inotify, osx with FSEvents, windows with ReadDirectoryChangesW)
+- [x] Cross Platform (linux with inotify, osx with FSEvents, windows with ReadDirectoryChangesW)
 - [x] Just C, mostly headers
 - [x] Directory watching (with recursive)
 - [x] File watching
@@ -12,8 +12,14 @@
 - [x] Async
 - [x] Symlink support
 - [x] Absolte, relative paths
-- [] Remote directories
-- [] Fallback system (ex. kqueue for osx)
+- [ ] Remote directories
+- [ ] Fallback system (ex. kqueue for osx)
+- [ ] Tests
+- [ ] Examples (more)
+- [ ] Documentation
+- [ ] Benchmarks
+- [ ] C++ support (...)
+- [ ] More platforms (BSD, Web...)
 
 ### Prerequisites
 
