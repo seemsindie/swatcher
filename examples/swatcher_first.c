@@ -4,26 +4,35 @@
 
 static swatcher *global_watcher = NULL;
 
-void my_callback_function(swatcher_fs_event event, swatcher_target *target, const char *filename)
+void my_callback_function(swatcher_fs_event event, swatcher_target *target, const char *eventname, void *additional_data)
 {
-    SWATCHER_LOG_DEFAULT_DEBUG("Event: %s", get_event_name(event));
-    SWATCHER_LOG_DEFAULT_DEBUG("Target path: %s", target->path);
-    // printf("Target is_file: %s\n", target->is_file ? "true" : "false"); // might give "false" indications if file is created in a watched directory it will be false but that's becasuse that target is not but a file is created...i don't give a fuck...
-    if (filename != NULL)
-    {
-        SWATCHER_LOG_DEFAULT_DEBUG("Event name: %s", filename);
-    }
-    else
-    {
-        if (target->is_file)
-        {
-            SWATCHER_LOG_DEFAULT_DEBUG("Event name: file itself");
-        }
-        else
-        {
-            SWATCHER_LOG_DEFAULT_DEBUG("Event name: Directory itself");
-        }
-    }
+    // SWATCHER_LOG_DEFAULT_INFO("Event: %s", get_event_name(event));
+    // SWATCHER_LOG_DEFAULT_INFO("Target path: %s", target->path);
+    // // printf("Target is_file: %s\n", target->is_file ? "true" : "false"); // might give "false" indications if file is created in a watched directory it will be false but that's becasuse that target is not but a file is created...i don't give a fuck...
+    // if (eventname != NULL)
+    // {
+    //     SWATCHER_LOG_DEFAULT_INFO("Event name: %s", eventname);
+    // }
+    // else
+    // {
+    //     if (target->is_file)
+    //     {
+    //         SWATCHER_LOG_DEFAULT_INFO("Event name: file itself");
+    //     }
+    //     else
+    //     {
+    //         SWATCHER_LOG_DEFAULT_INFO("Event name: Directory itself");
+    //     }
+    // }
+    // if (eventname != NULL || target->is_file) {
+        SWATCHER_LOG_DEFAULT_INFO("Event: %s", get_event_name(event));
+        SWATCHER_LOG_DEFAULT_INFO("Target path: %s", target->path);
+        SWATCHER_LOG_DEFAULT_INFO("Event name: %s", eventname);
+        struct inotify_event *ievent = (struct inotify_event *) additional_data;
+
+        SWATCHER_LOG_DEFAULT_INFO("inotify event name: %s", ievent->name);
+        SWATCHER_LOG_DEFAULT_INFO("inotify event mask: %d", ievent->mask);
+    // }
 }
 
 int main()
@@ -31,7 +40,10 @@ int main()
     // swatcher *watcher = malloc(sizeof(swatcher));
     global_watcher = malloc(sizeof(swatcher));
     // char *path = "/home/timelord/projects/swatcher/examples/test";
+    // char *path = "/home/timelord/projects/swatcher/examples/editorconfig";
     char *path = "../examples/test/";
+    // char *path = "/home/timelord/projects/work/host-staffing/host-staffing-ui";
+    // char *path = "/home/timelord/projects/work/host-staffing/host-staffing-ui/node_modules/editorconfig/node_modules";
     swatcher_config config = {
         .poll_interval_ms = 50,
         .enable_logging = true};
@@ -55,19 +67,24 @@ int main()
         .path = path,
         .is_recursive = true,
         .events = SWATCHER_EVENT_DELETED | SWATCHER_EVENT_CREATED | SWATCHER_EVENT_MODIFIED | SWATCHER_EVENT_MOVED,
-        // .events = SWATCHER_EVENT_ALL,
         // .pattern = ".*\\.txt$",
+        // .callback_patterns = REGEX_PATTERNS(".*\\.txt$", ".*\\.c$", ".*\\.h$"),
+        // .watch_patterns = REGEX_PATTERNS(".*\\.txt$"),
+        .ignore_patterns = REGEX_PATTERNS(".*\\.txt$"),
+        .watch_options = SWATCHER_WATCH_ALL,
+        .follow_symlinks = false,
         .user_data = "Hello, world (user data)!",
         .callback = my_callback_function});
     swatcher_add(global_watcher, target);
 
     swatcher_start(global_watcher);
 
+
     getchar();
 
     swatcher_remove(global_watcher, target);
-
     swatcher_stop(global_watcher);
+
     swatcher_cleanup(global_watcher);
 
     return EXIT_SUCCESS;

@@ -1,29 +1,36 @@
 #include <sys/inotify.h>
+#include <sys/stat.h>
 #include <limits.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <dirent.h>
 #include <poll.h>
-#include <sys/stat.h> // Include for struct stat and lstat
-
+typedef struct swatcher_target_linux
+{
+    int wd;
+    swatcher_target *target;
+    UT_hash_handle hh;
+} swatcher_target_linux;
 typedef struct swatcher_linux
 {
     int inotify_fd;
     pthread_t thread;
     int thread_id;
     pthread_mutex_t mutex;
-    bool running;
     struct pollfd fds;
+    swatcher_target_linux *wd_to_target;
 } swatcher_linux;
-
-typedef struct swatcher_target_linux
-{
-    int wd;
-} swatcher_target_linux;
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define BUF_LEN (1024 * (EVENT_SIZE + 16))
 #define DIR_BREAK '/'
+
+bool is_already_watched(swatcher *swatcher, const char *path)
+{
+    swatcher_target *target = NULL;
+    HASH_FIND(hh_global, swatcher->targets, path, strlen(path), target);
+    return target != NULL;
+}
 
 uint32_t swatcher_target_events_to_inotify_mask(swatcher_target *target)
 {
@@ -95,7 +102,7 @@ swatcher_fs_event convert_inotify_event_to_swatcher_event(uint32_t inotify_event
         return SWATCHER_EVENT_MODIFIED;
     }
 
-    if ((inotify_event_mask & IN_DELETE) || (inotify_event_mask & IN_DELETE_SELF))
+    if ((inotify_event_mask & IN_DELETE))
     {
         return SWATCHER_EVENT_DELETED;
     }
@@ -169,17 +176,415 @@ const char *get_event_name_from_inotify_mask(uint32_t inotify_event_mask)
     }
 }
 
+bool add_watch(swatcher *swatcher, swatcher_target *target)
+{
+    if (is_already_watched(swatcher, target->path))
+    {
+        SWATCHER_LOG_DEFAULT_WARNING("Path already watched: %s", target->path);
+        return false;
+    }
+    else
+    {
+        SWATCHER_LOG_DEFAULT_INFO("Target %s is being watched", target->path);
+    }
+    swatcher_linux *sw_linux = (swatcher_linux *)swatcher->platform_data;
+    swatcher_target_linux *sw_target_linux = malloc(sizeof(swatcher_target_linux));
+    if (sw_target_linux == NULL)
+    {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_target_linux");
+        return false;
+    }
+
+    sw_target_linux->target = target;
+    sw_target_linux->wd = inotify_add_watch(sw_linux->inotify_fd, target->path, swatcher_target_events_to_inotify_mask(target));
+    if (sw_target_linux->wd < 0)
+    {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to add watch for %s", target->path);
+        free(sw_target_linux);
+        return false;
+    }
+
+    HASH_ADD_INT(sw_linux->wd_to_target, wd, sw_target_linux);
+    target->platform_data = sw_target_linux;
+
+    swatcher_target *found_target = NULL;
+    HASH_FIND(hh_global, swatcher->targets, target->path, strlen(target->path), found_target);
+    if (found_target == NULL)
+    {
+        HASH_ADD_KEYPTR(hh_global, swatcher->targets, target->path, strlen(target->path), target);
+    }
+
+    return true;
+}
+
+bool add_watch_recursive_locked(swatcher *swatcher, swatcher_target *original_target, bool dont_add_watch)
+{
+    swatcher_linux *sw_linux = (swatcher_linux *)swatcher->platform_data;
+    swatcher_target *target = original_target;
+
+    if (target->is_file)
+    {
+        return add_watch(swatcher, target);
+    }
+
+    DIR *dir = opendir(target->path);
+    if (dir == NULL)
+    {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to open directory: %s", target->path);
+        return false;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+
+        if (original_target->ignore_patterns != NULL)
+        {
+            if (is_pattern_matched(original_target->ignore_patterns, entry->d_name))
+            {
+                continue;
+            }
+        }
+
+        if (!original_target->watch_patterns || is_pattern_matched(original_target->watch_patterns, entry->d_name) || entry->d_type == DT_DIR)
+        {
+
+            if (entry->d_type == DT_DIR)
+            {
+                // if (target->watch_options & SWATCHER_WATCH_DIRECTORIES || target->watch_options == SWATCHER_WATCH_ALL)
+                // {
+                if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                {
+                    continue;
+                }
+
+                char new_path[PATH_MAX];
+                // snprintf(new_path, PATH_MAX, "%s/%s", target->path, entry->d_name);
+
+                // trailing slash check
+                if (original_target->path[strlen(original_target->path) - 1] == '/')
+                {
+                    snprintf(new_path, PATH_MAX, "%s%s", original_target->path, entry->d_name);
+                }
+                else
+                {
+                    snprintf(new_path, PATH_MAX, "%s/%s", original_target->path, entry->d_name);
+                }
+
+                swatcher_target_desc new_target_desc = {
+                    .path = new_path,
+                    .is_recursive = target->is_recursive,
+                    .events = target->events,
+                    .watch_options = target->watch_options,
+                    .follow_symlinks = target->follow_symlinks,
+                    .user_data = target->user_data,
+                    .callback_patterns = target->callback_patterns,
+                    .watch_patterns = target->watch_patterns,
+                    .ignore_patterns = target->ignore_patterns,
+                    .callback = target->callback};
+
+                swatcher_target *new_target = swatcher_target_create(&new_target_desc);
+                if (new_target == NULL)
+                {
+                    SWATCHER_LOG_DEFAULT_WARNING("Failed to create new target for %s", new_path);
+                    continue;
+                }
+
+                if (!add_watch_recursive_locked(swatcher, new_target, target->watch_options == SWATCHER_WATCH_FILES || target->watch_options == SWATCHER_WATCH_SYMLINKS || (original_target->watch_patterns && !is_pattern_matched(original_target->watch_patterns, entry->d_name))))
+                {
+                    SWATCHER_LOG_DEFAULT_WARNING("Failed to add watch for %s", new_target->path);
+                    free(new_target->path);
+                    free(new_target);
+                    continue;
+                }
+
+                // HASH_ADD_KEYPTR(hh_inner, target->inner_targets, new_target->path, strlen(new_target->path), new_target);
+                // }
+            }
+            else if (entry->d_type == DT_REG) // just a file
+            {
+                if (target->watch_options & SWATCHER_WATCH_FILES || target->watch_options == SWATCHER_WATCH_ALL)
+                {
+                    char new_path[PATH_MAX];
+                    // snprintf(new_path, PATH_MAX, "%s/%s", target->path, entry->d_name);
+
+                    // trailing slash check
+                    if (original_target->path[strlen(original_target->path) - 1] == '/')
+                    {
+                        snprintf(new_path, PATH_MAX, "%s%s", original_target->path, entry->d_name);
+                    }
+                    else
+                    {
+                        snprintf(new_path, PATH_MAX, "%s/%s", original_target->path, entry->d_name);
+                    }
+
+                    swatcher_target_desc new_target_desc = {
+                        .path = new_path,
+                        .is_recursive = target->is_recursive,
+                        .events = target->events,
+                        .watch_options = target->watch_options,
+                        .follow_symlinks = target->follow_symlinks,
+                        .user_data = target->user_data,
+                        .callback_patterns = target->callback_patterns,
+                        .watch_patterns = target->watch_patterns,
+                        .ignore_patterns = target->ignore_patterns,
+                        .callback = target->callback};
+
+                    swatcher_target *new_target = swatcher_target_create(&new_target_desc);
+                    if (new_target == NULL)
+                    {
+                        SWATCHER_LOG_DEFAULT_WARNING("Failed to create new target for %s", new_path);
+                        continue;
+                    }
+
+                    if (!add_watch(swatcher, new_target))
+                    {
+                        SWATCHER_LOG_DEFAULT_WARNING("Failed to add watch (DT_REG) for %s", new_target->path);
+                        free(new_target->path);
+                        free(new_target);
+                        continue;
+                    }
+
+                    // HASH_ADD_KEYPTR(hh_inner, target->inner_targets, new_target->path, strlen(new_target->path), new_target);
+                }
+            }
+            else if (entry->d_type == DT_LNK)
+            {
+                if (target->follow_symlinks)
+                {
+                    char new_path[PATH_MAX];
+                    // snprintf(new_path, PATH_MAX, "%s/%s", target->path, entry->d_name);
+
+                    // trailing slash check
+                    if (original_target->path[strlen(original_target->path) - 1] == '/')
+                    {
+                        snprintf(new_path, PATH_MAX, "%s%s", original_target->path, entry->d_name);
+                    }
+                    else
+                    {
+                        snprintf(new_path, PATH_MAX, "%s/%s", original_target->path, entry->d_name);
+                    }
+
+                    swatcher_target_desc new_target_desc = {
+                        .path = new_path,
+                        .is_recursive = target->is_recursive,
+                        .events = target->events,
+                        .watch_options = target->watch_options,
+                        .follow_symlinks = target->follow_symlinks,
+                        .user_data = target->user_data,
+                        .callback_patterns = target->callback_patterns,
+                        .watch_patterns = target->watch_patterns,
+                        .ignore_patterns = target->ignore_patterns,
+                        .callback = target->callback};
+
+                    swatcher_target *new_target = swatcher_target_create(&new_target_desc);
+                    if (new_target == NULL)
+                    {
+                        SWATCHER_LOG_DEFAULT_ERROR("Failed to create new target for %s", new_path);
+                        continue;
+                    }
+
+                    if (new_target->is_file)
+                    {
+                        if (original_target->watch_options & SWATCHER_WATCH_FILES || original_target->watch_options == SWATCHER_WATCH_ALL)
+                        {
+                            if (!add_watch(swatcher, new_target))
+                            {
+                                SWATCHER_LOG_DEFAULT_WARNING("Failed to add watch (DT_LNK) for %s", new_target->path);
+                                free(new_target->path);
+                                free(new_target);
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            // SWATCHER_LOG_DEFAULT_WARNING("Not adding watch (DT_LNK, file) for %s", new_target->path);
+                            free(new_target->path);
+                            free(new_target);
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        if (original_target->watch_options & SWATCHER_WATCH_DIRECTORIES || original_target->watch_options == SWATCHER_WATCH_ALL)
+                        {
+                            if (!add_watch_recursive_locked(swatcher, new_target, false))
+                            {
+                                SWATCHER_LOG_DEFAULT_WARNING("Failed to add watch (DT_LNK, dir) for %s", new_target->path);
+                                free(new_target->path);
+                                free(new_target);
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            // SWATCHER_LOG_DEFAULT_WARNING("Not adding watch (DT_LNK, dir) for %s", new_target->path);
+                            free(new_target->path);
+                            free(new_target);
+                            continue;
+                        }
+                    }
+
+                    // HASH_ADD_KEYPTR(hh_inner, target->inner_targets, new_target->path, strlen(new_target->path), new_target);
+                }
+                else
+                {
+                    if (original_target->watch_options & SWATCHER_WATCH_SYMLINKS || original_target->watch_options == SWATCHER_WATCH_ALL)
+                    {
+                        char new_path[PATH_MAX];
+                        // snprintf(new_path, PATH_MAX, "%s/%s", target->path, entry->d_name);
+
+                        // trailing slash check
+                        if (original_target->path[strlen(original_target->path) - 1] == '/')
+                        {
+                            snprintf(new_path, PATH_MAX, "%s%s", original_target->path, entry->d_name);
+                        }
+                        else
+                        {
+                            snprintf(new_path, PATH_MAX, "%s/%s", original_target->path, entry->d_name);
+                        }
+
+                        // just add a watch for the symlink itself
+                        swatcher_target_desc new_target_desc = {
+                            .path = new_path,
+                            .is_recursive = original_target->is_recursive,
+                            .events = original_target->events,
+                            .watch_options = original_target->watch_options,
+                            .follow_symlinks = original_target->follow_symlinks,
+                            .user_data = original_target->user_data,
+                            .callback_patterns = original_target->callback_patterns,
+                            .watch_patterns = original_target->watch_patterns,
+                            .ignore_patterns = original_target->ignore_patterns,
+                            .callback = original_target->callback};
+
+                        swatcher_target *new_target = swatcher_target_create(&new_target_desc);
+                        if (new_target == NULL)
+                        {
+                            SWATCHER_LOG_DEFAULT_ERROR("Failed to create new target for %s", original_target->path);
+                            continue;
+                        }
+
+                        if (!add_watch(swatcher, new_target))
+                        {
+                            SWATCHER_LOG_DEFAULT_WARNING("Failed to add watch (DT_LNK) for %s", new_target->path);
+                            free(new_target->path);
+                            free(new_target);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    closedir(dir);
+
+    if (dont_add_watch)
+    {
+        return true;
+    }
+
+    return add_watch(swatcher, target);
+}
+
+bool add_watch_recursive(swatcher *swatcher, swatcher_target *target, bool dont_add_watch)
+{
+    pthread_mutex_lock(&((swatcher_linux *)swatcher->platform_data)->mutex);
+
+    bool result = add_watch_recursive_locked(swatcher, target, dont_add_watch);
+
+    pthread_mutex_unlock(&((swatcher_linux *)swatcher->platform_data)->mutex);
+
+    return result;
+}
+
+bool swatcher_add(swatcher *swatcher, swatcher_target *target)
+{
+
+    bool result = false;
+
+    if (!target->is_file && target->is_recursive)
+    {
+        // don't add dirs to watch recursively if watch option is just files or links
+        result = add_watch_recursive(swatcher, target, target->watch_options == SWATCHER_WATCH_FILES || target->watch_options == SWATCHER_WATCH_SYMLINKS || target->watch_patterns != NULL);
+    }
+    else
+    {
+        pthread_mutex_lock(&((swatcher_linux *)swatcher->platform_data)->mutex);
+        result = add_watch(swatcher, target);
+        pthread_mutex_unlock(&((swatcher_linux *)swatcher->platform_data)->mutex);
+    }
+
+    return result;
+}
+
+bool handle_create_event(swatcher *swatcher, swatcher_target *original_target, struct inotify_event *event)
+{
+    char new_path[PATH_MAX];
+    snprintf(new_path, PATH_MAX, "%s/%s", original_target->path, event->name);
+
+    bool is_dir = event->mask & IN_ISDIR;
+    bool should_watch = false;
+
+    if (is_dir && (original_target->watch_options & SWATCHER_WATCH_DIRECTORIES || original_target->watch_options == SWATCHER_WATCH_ALL))
+    {
+        should_watch = true;
+    }
+    else if (!is_dir && (original_target->watch_options & SWATCHER_WATCH_FILES || original_target->watch_options == SWATCHER_WATCH_ALL))
+    {
+        should_watch = true;
+    }
+
+    bool is_watching_already = is_already_watched(swatcher, new_path); // || is_already_watched(swatcher, new_path);
+
+    // SWATCHER_LOG_DEBUG(swatcher, "handle_create_event: %s, is_dir: %d, should_watch: %d, is_watching_already: %d", new_path, is_dir, should_watch, is_watching_already);
+
+    if (should_watch && !is_watching_already)
+    {
+        swatcher_target_desc new_target_desc = {
+            .path = new_path,
+            .is_recursive = original_target->is_recursive,
+            .events = original_target->events,
+            .watch_options = original_target->watch_options,
+            .user_data = original_target->user_data,
+            .pattern = original_target->pattern,
+            .callback = original_target->callback};
+
+        swatcher_target *new_target = swatcher_target_create(&new_target_desc);
+        if (new_target == NULL)
+        {
+            SWATCHER_LOG_DEFAULT_ERROR("Failed to create new target for %s", new_path);
+
+            free(new_target->path);
+            free(new_target);
+
+            return false;
+        }
+
+        if (!add_watch_recursive_locked(swatcher, new_target, false))
+        {
+            SWATCHER_LOG_DEFAULT_ERROR("Failed to add watch for %s", new_target->path);
+            free(new_target->path);
+            free(new_target);
+            return false;
+        }
+
+        // SWATCHER_LOG_DEBUG(swatcher, "Added watch for %s", new_target->path);
+
+        return true;
+    }
+}
+
 void *swatcher_watcher_thread(void *arg)
 {
     swatcher *swatcher_instance = (swatcher *)arg;
     swatcher_linux *sw_linux = (swatcher_linux *)swatcher_instance->platform_data;
-
     char buffer[BUF_LEN];
+    char full_path[PATH_MAX];
 
-    while (sw_linux->running)
+    while (swatcher_instance->running)
     {
-        int poll_ret = poll(&sw_linux->fds, 1, swatcher_instance->config->poll_interval_ms); // 1 second timeout
-
+        int poll_ret = poll(&sw_linux->fds, 1, swatcher_instance->config->poll_interval_ms);
         if (poll_ret < 0)
         {
             SWATCHER_LOG_DEFAULT_ERROR("poll failed");
@@ -188,89 +593,100 @@ void *swatcher_watcher_thread(void *arg)
 
         if (poll_ret == 0)
         {
-            // Timeout
+            // Timeout, continue to next iteration
             continue;
         }
 
-        if (poll_ret > 0)
+        int length = read(sw_linux->inotify_fd, buffer, BUF_LEN);
+        if (length < 0)
         {
-            int length = read(sw_linux->inotify_fd, buffer, BUF_LEN);
+            SWATCHER_LOG_ERROR(swatcher_instance, "Error reading inotify FD");
+            break;
+        }
 
-            if (length < 0)
+        int i = 0;
+        while (i < length)
+        {
+            struct inotify_event *event = (struct inotify_event *)&buffer[i];
+            swatcher_target_linux *target_data = NULL;
+
+            HASH_FIND_INT(sw_linux->wd_to_target, &event->wd, target_data);
+            if (target_data == NULL)
             {
-                if (errno == EINTR)
-                {
-                    // Interrupted by a signal, try again
-                    continue;
-                }
-
-                SWATCHER_LOG_ERROR(swatcher_instance, "Error reading inotify FD");
-                break;
+                // SWATCHER_LOG_WARNING(swatcher_instance, "Failed to find target for wd: %d", event->wd);
+                i += sizeof(struct inotify_event) + event->len;
+                continue;
             }
 
-            int i = 0;
-            while (i < length)
+            swatcher_target *target = target_data->target;
+
+            // TODO: move this into a separate function
+            // if (event->mask & IN_ISDIR) {
+            //     if (event->mask & IN_CREATE) {
+            //         snprintf(full_path, PATH_MAX, "%s/%s", target->path, event->name);
+            //         swatcher_target_desc new_target_desc = {
+            //             .path = full_path,
+            //             .is_recursive = target->is_recursive,
+            //             .events = target->events,
+            //             .watch_options = target->watch_options,
+            //             .user_data = target->user_data,
+            //             .pattern = target->pattern,
+            //             .callback = target->callback
+            //         };
+            //         swatcher_target *new_target = swatcher_target_create(&new_target_desc);
+            //         if (new_target == NULL) {
+            //             SWATCHER_LOG_ERROR(swatcher_instance, "Failed to create new target for %s", full_path);
+            //             i += sizeof(struct inotify_event) + event->len;
+            //             continue;
+            //         }
+
+            //         if (!add_watch_recursive(swatcher_instance, new_target, false)) {
+            //             SWATCHER_LOG_ERROR(swatcher_instance, "Failed to add watch for %s", new_target->path);
+            //             free(new_target->path);
+            //             free(new_target);
+            //             i += sizeof(struct inotify_event) + event->len;
+            //             continue;
+            //         }
+            //     }
+            // }
+
+            swatcher_fs_event sw_event = convert_inotify_event_to_swatcher_event(event->mask);
+            // SWATCHER_LOG_DEBUG(swatcher_instance, "Event: %s", get_event_name_from_inotify_mask(event->mask));
+            // SWATCHER_LOG_DEBUG(swatcher_instance, "Event len: %d", event->len);
+            // SWATCHER_LOG_DEBUG(swatcher_instance, "Event wd: %d", event->wd);
+            // SWATCHER_LOG_DEBUG(swatcher_instance, "Event mask: %d", event->mask);
+            // SWATCHER_LOG_DEBUG(swatcher_instance, "Event cookie: %d", event->cookie);
+            // SWATCHER_LOG_DEBUG(swatcher_instance, "Event name: %s", event->len > 0 ? event->name : "NULL");
+            // SWATCHER_LOG_DEBUG(swatcher_instance, "Target path: %s", target->path);
+            if (sw_event != SWATCHER_EVENT_NONE)
             {
-                struct inotify_event *event = (struct inotify_event *)&buffer[i];
-
-                pthread_mutex_lock(&sw_linux->mutex);
-                swatcher_target_node *current = swatcher_instance->targets_head;
-
-                time_t current_time = time(NULL);
-                while (current != NULL)
+                if ((target->events & sw_event) || (target->events == SWATCHER_EVENT_ALL))
                 {
-                    swatcher_target_linux *sw_target_linux = (swatcher_target_linux *)current->target->platform_data;
-                    if (sw_target_linux->wd == event->wd)
+                    if (target->callback_patterns != NULL && event->len > 0 && event->name != 0)
                     {
-                        swatcher_fs_event sw_event = convert_inotify_event_to_swatcher_event(event->mask);
-
-                        if (sw_event != SWATCHER_EVENT_NONE)
+                        bool res = is_pattern_matched(target->callback_patterns, event->len > 0 ? event->name : NULL);
+                        if (res)
                         {
-                            if ((current->target->events & sw_event) || (current->target->events == SWATCHER_EVENT_ALL))
-                            {
-                                if (current->target->pattern != NULL && event->len > 0 && event->name != 0)
-                                {
-                                    bool res = is_pattern_matched(current->target->pattern, event->len > 0 ? event->name : NULL);
-                                    // SWATCHER_LOG_DEBUG(swatcher_instance, "Pattern %s %s %s", current->target->pattern, res ? "matched" : "did not match", event->name);
-
-                                    if (res)
-                                    {
-                                        // SWATCHER_LOG_DEBUG(swatcher_instance, "Pattern %s did match %s", current->target->pattern, event->name);
-
-                                        current->target->callback(sw_event, current->target, event->len > 0 ? event->name : NULL);
-                                        current->target->last_event_time = current_time;
-                                        break;
-                                    }
-                                    else
-                                    {
-                                        // SWATCHER_LOG_DEBUG(swatcher_instance, "Pattern %s did not match %s", current->target->pattern, event->name);
-                                    }
-                                }
-                                else
-                                {
-                                    if (current->target->pattern == NULL)
-                                    {
-                                        // SWATCHER_LOG_DEBUG(swatcher_instance, "Pattern is NULL");
-                                        current->target->callback(sw_event, current->target, event->len > 0 ? event->name : NULL);
-                                        current->target->last_event_time = current_time;
-                                        break;
-                                    }
-                                }
-                            }
+                            target->callback(sw_event, target, event->len > 0 ? event->name : NULL, event);
+                            target->last_event_time = time(NULL);
                         }
                     }
-
-                    current = current->next;
+                    else
+                    {
+                        if (target->callback_patterns == NULL)
+                        {
+                            target->callback(sw_event, target, event->len > 0 ? event->name : NULL, event);
+                            target->last_event_time = time(NULL);
+                        }
+                    }
                 }
-
-                i += EVENT_SIZE + event->len;
-                pthread_mutex_unlock(&sw_linux->mutex);
             }
+
+            i += sizeof(struct inotify_event) + event->len;
         }
     }
 
     SWATCHER_LOG_INFO(swatcher_instance, "Watcher thread exiting...");
-
     return NULL;
 }
 
@@ -283,27 +699,60 @@ bool swatcher_is_absolute_path(const char *path)
     return path[0] == '/';
 }
 
-bool swatcher_validate_and_normalize_path(const char *input_path, char *normalized_path)
+bool swatcher_validate_and_normalize_path(const char *input_path, char *normalized_path, bool resolve_symlinks)
 {
-    if (!swatcher_is_absolute_path(input_path))
+    if (!resolve_symlinks)
     {
-        char cwd[PATH_MAX];
-        if (getcwd(cwd, sizeof(cwd)) != NULL)
+        // When not resolving symlinks, just check if the path is absolute
+        // and copy it directly or prepend the current working directory.
+        if (swatcher_is_absolute_path(input_path))
         {
-            snprintf(normalized_path, PATH_MAX, "%s/%s", cwd, input_path);
+            strncpy(normalized_path, input_path, PATH_MAX);
+            normalized_path[PATH_MAX - 1] = '\0'; // Ensure null-termination
         }
         else
         {
-            SWATCHER_LOG_DEFAULT_ERROR("Failed to get current working directory");
-            return false;
+            char cwd[PATH_MAX];
+            if (getcwd(cwd, sizeof(cwd)) != NULL)
+            {
+                snprintf(normalized_path, PATH_MAX, "%s/%s", cwd, input_path);
+            }
+            else
+            {
+                SWATCHER_LOG_DEFAULT_ERROR("Failed to get current working directory");
+                return false;
+            }
         }
     }
     else
     {
-        if (realpath(input_path, normalized_path) == NULL)
+        // Resolve the path fully, including symlinks.
+        if (!swatcher_is_absolute_path(input_path))
         {
-            SWATCHER_LOG_DEFAULT_ERROR("Failed to get real path for %s", input_path);
-            return false;
+            char cwd[PATH_MAX];
+            if (getcwd(cwd, sizeof(cwd)) != NULL)
+            {
+                char temp_path[PATH_MAX];
+                snprintf(temp_path, PATH_MAX, "%s/%s", cwd, input_path);
+                if (realpath(temp_path, normalized_path) == NULL)
+                {
+                    SWATCHER_LOG_DEFAULT_ERROR("Failed to get real path for %s", temp_path);
+                    return false;
+                }
+            }
+            else
+            {
+                SWATCHER_LOG_DEFAULT_ERROR("Failed to get current working directory");
+                return false;
+            }
+        }
+        else
+        {
+            if (realpath(input_path, normalized_path) == NULL)
+            {
+                SWATCHER_LOG_DEFAULT_ERROR("Failed to get real path for %s", input_path);
+                return false;
+            }
         }
     }
     return true;
@@ -331,8 +780,8 @@ bool swatcher_init(swatcher *swatcher, swatcher_config *config)
     }
 
     swatcher_linux *sw_linux = (swatcher_linux *)swatcher->platform_data;
-    sw_linux->running = false;
-    sw_linux->thread_id = -1; // Initialize to invalid value
+    swatcher->running = false;
+    sw_linux->thread_id = -1;
 
     if (pthread_mutex_init(&sw_linux->mutex, NULL) != 0)
     {
@@ -351,9 +800,11 @@ bool swatcher_init(swatcher *swatcher, swatcher_config *config)
 
     sw_linux->fds.fd = sw_linux->inotify_fd;
     sw_linux->fds.events = POLLIN;
+    sw_linux->wd_to_target = NULL;
 
-    swatcher->targets_head = NULL;
+    swatcher->targets = NULL;
     swatcher->config = config;
+    swatcher->targets = NULL;
 
     return true;
 }
@@ -378,7 +829,7 @@ bool swatcher_start(swatcher *swatcher)
         return false;
     }
 
-    sw_linux->running = true;
+    swatcher->running = true;
     sw_linux->thread_id = ret;
 
     return true;
@@ -387,8 +838,7 @@ bool swatcher_start(swatcher *swatcher)
 void swatcher_stop(swatcher *swatcher)
 {
     swatcher_linux *sw_linux = (swatcher_linux *)swatcher->platform_data;
-
-    sw_linux->running = false;
+    swatcher->running = false;
 
     // stop watcher thread
     pthread_join(sw_linux->thread, NULL);
@@ -397,249 +847,79 @@ void swatcher_stop(swatcher *swatcher)
     close(sw_linux->inotify_fd);
 }
 
+// TODO: check if null before freeing
 void swatcher_cleanup(swatcher *swatcher)
 {
-    // Free the linked list of targets
-    swatcher_target_node *current = swatcher->targets_head;
-    while (current != NULL)
+    swatcher_target *current, *tmp;
+    swatcher_linux *sw_linux = (swatcher_linux *)swatcher->platform_data;
+
+    HASH_ITER(hh_global, swatcher->targets, current, tmp)
     {
-        SWATCHER_LOG_DEFAULT_DEBUG("Freeing target: %s", current->target->path);
-        swatcher_target_node *next = current->next;
+        swatcher_target_linux *sw_target_linux = (swatcher_target_linux *)current->platform_data;
+        if (sw_target_linux)
+        {
+            inotify_rm_watch(sw_linux->inotify_fd, sw_target_linux->wd);
+            HASH_DEL(sw_linux->wd_to_target, sw_target_linux);
+            free(sw_target_linux);
+        }
 
-        free(current->target->path);
-        current->target->path = NULL;
+        // delete inner targets
+        // swatcher_target *inner_current, *inner_tmp;
+        // HASH_ITER(hh_inner, current->inner_targets, inner_current, inner_tmp)
+        // {
+        //     // todo
+        // }
 
-        free(current->target->platform_data);
-        current->target->platform_data = NULL;
-
-        free(current->target->pattern);
-        current->target->pattern = NULL;
-
-        free(current->target);
+        HASH_DELETE(hh_global, swatcher->targets, current);
+        free(current->path);
+        // free(current->callback_patterns);
+        // free(current->watch_patterns);
+        // free(current->ignore_patterns);
         free(current);
-
-        current = next;
     }
 
-    // pthred cleanup
-    swatcher_linux *sw_linux = (swatcher_linux *)swatcher->platform_data;
     pthread_mutex_destroy(&sw_linux->mutex);
-
-    // Free platform data
     free(swatcher->platform_data);
-    swatcher->platform_data = NULL;
-
-    // Free the swatcher struct
     free(swatcher);
-}
-
-bool add_watch(swatcher *swatcher, swatcher_target *target)
-{
-    swatcher_linux *sw_linux = (swatcher_linux *)swatcher->platform_data;
-
-    int wd = inotify_add_watch(sw_linux->inotify_fd, target->path, swatcher_target_events_to_inotify_mask(target));
-    if (wd < 0)
-    {
-        SWATCHER_LOG_DEFAULT_ERROR("Failed to add watch for %s", target->path);
-        return false;
-    }
-
-    swatcher_target_node *new_node = malloc(sizeof(swatcher_target_node));
-    if (new_node == NULL)
-    {
-        SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_target_node");
-        return false;
-    }
-
-    new_node->target = target; // Copy the target struct
-
-    swatcher_target_linux *sw_target_linux = malloc(sizeof(swatcher_target_linux));
-    if (sw_target_linux == NULL)
-    {
-        SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_target_linux");
-        free(new_node);
-        return false;
-    }
-
-    sw_target_linux->wd = wd;
-
-    new_node->target->platform_data = sw_target_linux;
-
-    new_node->next = swatcher->targets_head;
-    swatcher->targets_head = new_node;
-
-    SWATCHER_LOG_DEBUG(swatcher, "Added watch for %s", target->path);
-
-    return true;
-}
-
-bool add_watch_recursive_locked(swatcher *swatcher, swatcher_target *original_target, bool is_first_call)
-{
-    if (!add_watch(swatcher, original_target))
-    {
-        return false;
-    }
-
-    if (!original_target->is_file && !original_target->is_recursive)
-    {
-        return true;
-    }
-
-    DIR *dir = opendir(original_target->path);
-    if (dir == NULL)
-    {
-        SWATCHER_LOG_DEFAULT_ERROR("Failed to open directory: %s", original_target->path);
-        return false;
-    }
-
-    struct dirent *entry;
-
-    while ((entry = readdir(dir)) != NULL)
-    {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-        {
-            // Skip . and ..
-            continue;
-        }
-
-        size_t new_path_len = strlen(original_target->path) + strlen(entry->d_name) + 2; // +2 for potential slash and null terminator
-        char *new_path = malloc(new_path_len);
-        if (new_path == NULL)
-        {
-            SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate new path");
-            return false;
-        }
-
-        // Handle trailing slash in original path
-        if (original_target->path[strlen(original_target->path) - 1] == '/')
-        {
-            snprintf(new_path, new_path_len, "%s%s", original_target->path, entry->d_name);
-        }
-        else
-        {
-            snprintf(new_path, new_path_len, "%s/%s", original_target->path, entry->d_name);
-        }
-
-        swatcher_target_desc new_target_desc = {
-            .path = new_path,
-            .is_recursive = original_target->is_recursive,
-            .events = original_target->events,
-            .user_data = original_target->user_data,
-            .pattern = original_target->pattern,
-            .callback = original_target->callback};
-
-        swatcher_target *new_target = swatcher_target_create(&new_target_desc);
-        if (entry->d_type == DT_DIR)
-        {
-            if (!add_watch_recursive_locked(swatcher, new_target, false))
-            {
-                SWATCHER_LOG_DEFAULT_ERROR("Failed to add watch for directory for %s", new_target->path);
-                free(new_path);
-                free(new_target->path);
-                free(new_target);
-                closedir(dir);
-                return false;
-            }
-
-            // SWATCHER_LOG_INFO(swatcher, "Adding watch for directory for %s", new_target->path);
-        }
-        else
-        {
-            if (!add_watch(swatcher, new_target))
-            {
-                SWATCHER_LOG_DEFAULT_ERROR("Failed to add watch for file for %s", new_target->path);
-                free(new_path);
-                free(new_target->path);
-                free(new_target);
-                closedir(dir);
-                return false;
-            }
-
-            // SWATCHER_LOG_INFO(swatcher, "Adding watch for file for %s", new_target->path);
-        }
-
-        free(new_path);
-    }
-
-    closedir(dir);
-    return true;
-}
-
-bool add_watch_recursive(swatcher *swatcher, swatcher_target *target, bool is_first_call)
-{
-    pthread_mutex_lock(&((swatcher_linux *)swatcher->platform_data)->mutex);
-
-    bool result = add_watch_recursive_locked(swatcher, target, is_first_call);
-
-    pthread_mutex_unlock(&((swatcher_linux *)swatcher->platform_data)->mutex);
-
-    return result;
-}
-
-bool swatcher_add(swatcher *swatcher, swatcher_target *target)
-{
-
-    bool result = false;
-
-    if (!target->is_file && target->is_recursive)
-    {
-        result = add_watch_recursive(swatcher, target, true);
-    }
-    else
-    {
-        pthread_mutex_lock(&((swatcher_linux *)swatcher->platform_data)->mutex);
-        result = add_watch(swatcher, target);
-        pthread_mutex_unlock(&((swatcher_linux *)swatcher->platform_data)->mutex);
-    }
-
-    return result;
 }
 
 bool swatcher_remove(swatcher *swatcher, swatcher_target *target)
 {
     swatcher_linux *sw_linux = (swatcher_linux *)swatcher->platform_data;
-
     pthread_mutex_lock(&sw_linux->mutex);
 
-    swatcher_target_node *current = swatcher->targets_head;
-    swatcher_target_node *prev = NULL;
-
-    while (current != NULL)
+    swatcher_target_linux *sw_target_linux = (swatcher_target_linux *)target->platform_data;
+    if (sw_target_linux)
     {
-        if (current->target->path == target->path)
-        {
-            if (prev == NULL)
-            {
-                // First node
-                swatcher->targets_head = current->next;
-            }
-            else
-            {
-                prev->next = current->next;
-            }
+        inotify_rm_watch(sw_linux->inotify_fd, sw_target_linux->wd);
 
-            swatcher_target_linux *sw_target_linux = (swatcher_target_linux *)current->target->platform_data;
-            inotify_rm_watch(sw_linux->inotify_fd, sw_target_linux->wd);
+        HASH_DEL(sw_linux->wd_to_target, sw_target_linux);
 
-            free(current->target->path);
-            free(current->target->pattern);
-            free(current->target->platform_data);
-            free(current->target);
+        free(sw_target_linux);
+        target->platform_data = NULL;
+    }
 
-            free(current);
+    swatcher_target *found_target = NULL;
+    HASH_FIND(hh_global, swatcher->targets, target->path, strlen(target->path), found_target);
+    if (found_target)
+    {
+        // Find and delete inner targets
+        // swatcher_target *inner_current, *inner_tmp;
+        // HASH_ITER(hh_inner, found_target->inner_targets, inner_current, inner_tmp)
+        // {
+        //     todo
+        // }
 
-            pthread_mutex_unlock(&sw_linux->mutex);
-
-            return true;
-        }
-
-        prev = current;
-        current = current->next;
+        HASH_DELETE(hh_global, swatcher->targets, found_target);
+        free(found_target->path);
+        // free(found_target->callback_patterns);
+        // free(found_target->watch_patterns);
+        // free(found_target->ignore_patterns);
+        free(found_target);
     }
 
     pthread_mutex_unlock(&sw_linux->mutex);
-
-    return false;
+    return true;
 }
 
 swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
@@ -652,7 +932,7 @@ swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
     }
 
     char normalized_path[PATH_MAX];
-    if (!swatcher_validate_and_normalize_path(desc->path, normalized_path))
+    if (!swatcher_validate_and_normalize_path(desc->path, normalized_path, desc->follow_symlinks))
     {
         free(target);
         return NULL;
@@ -668,6 +948,7 @@ swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
     else
     {
         stat_result = lstat(normalized_path, &path_stat);
+        target->is_symlink = S_ISLNK(path_stat.st_mode);
     }
 
     if (stat_result != 0)
@@ -679,7 +960,8 @@ swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
 
     target->is_file = S_ISREG(path_stat.st_mode);
     target->is_directory = S_ISDIR(path_stat.st_mode);
-    target->is_symlink = S_ISLNK(path_stat.st_mode);
+
+    // SWATCHER_LOG_DEFAULT_DEBUG("Path: %s, is_file: %d, is_directory: %d, is_symlink: %d", normalized_path, target->is_file, target->is_directory, target->is_symlink);
 
     target->path = strdup(normalized_path);
     if (target->path == NULL)
@@ -689,27 +971,68 @@ swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
         return NULL;
     }
 
-    if (desc->pattern == 0)
+    // if (desc->pattern == 0)
+    // {
+    //     target->pattern = NULL;
+    // }
+    // else
+    // {
+    //     target->pattern = strdup(desc->pattern);
+    //     if (target->pattern == NULL)
+    //     {
+    //         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate pattern (regex string)");
+    //         free(target->path);
+    //         free(target);
+    //         return NULL;
+    //     }
+    // }
+    // char **callback_patterns; // regex patterns for callback triggering
+
+    if (desc->callback_patterns == 0)
     {
-        target->pattern = NULL;
+        target->callback_patterns = NULL;
     }
     else
     {
-        target->pattern = strdup(desc->pattern);
-        if (target->pattern == NULL)
-        {
-            SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate pattern (regex string)");
-            free(target->path);
-            free(target);
-            return NULL;
-        }
+        target->callback_patterns = desc->callback_patterns;
+    }
+
+    if (desc->watch_patterns == 0)
+    {
+        target->watch_patterns = NULL;
+    }
+    else
+    {
+        target->watch_patterns = desc->watch_patterns;
+    }
+
+    if (desc->ignore_patterns == 0)
+    {
+        target->ignore_patterns = NULL;
+    }
+    else
+    {
+        target->ignore_patterns = desc->ignore_patterns;
+    }
+
+    // watch options if NULL then default to SWATCHER_WATCH_ALL
+    if (desc->watch_options == 0)
+    {
+        target->watch_options = SWATCHER_WATCH_ALL;
+    }
+    else
+    {
+        target->watch_options = desc->watch_options;
     }
 
     target->is_recursive = desc->is_recursive;
     target->events = desc->events;
+    target->watch_options = desc->watch_options;
     target->user_data = desc->user_data;
     target->callback = desc->callback;
     target->last_event_time = time(NULL);
+    target->inner_targets = NULL;
+    target->follow_symlinks = desc->follow_symlinks;
 
     // SWATCHER_LOG_DEFAULT_DEBUG("Created target: %s", target->path);
 

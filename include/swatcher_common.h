@@ -8,7 +8,12 @@
 #include <regex.h>
 #include <stdarg.h>
 
+#include "uthash.h"
+#include "utarray.h"
+
 #define CURRENT_LOG_LEVEL LOG_DEBUG
+#define REGEX_PATTERNS(...) ((char*[]){__VA_ARGS__, NULL})
+
 
 // ANSI color codes
 #define COLOR_RED "\x1b[31m"
@@ -17,8 +22,9 @@
 #define COLOR_MAGENTA "\x1b[35m"
 #define COLOR_RESET "\x1b[0m"
 
-typedef enum event
+typedef enum swatcher_fs_event
 {
+    SWATCHER_EVENT_NONE = 0,
     SWATCHER_EVENT_CREATED = 1 << 0,
     SWATCHER_EVENT_MODIFIED = 1 << 1,
     SWATCHER_EVENT_DELETED = 1 << 2,
@@ -28,29 +34,43 @@ typedef enum event
     SWATCHER_EVENT_ACCESSED = 1 << 6,
     SWATCHER_EVENT_ATTRIB_CHANGE = 1 << 7,
 
-    SWATCHER_EVENT_NONE = 0,
     SWATCHER_EVENT_ALL = -2,
-    SWATCHER_EVENT_ALL_INOTIFY = -3,
+    SWATCHER_EVENT_ALL_INOTIFY = -3
 } swatcher_fs_event;
+
+typedef enum swatcher_watch_option
+{
+    SWATCHER_WATCH_ALL = 0,
+    SWATCHER_WATCH_FILES = 1 << 0,
+    SWATCHER_WATCH_DIRECTORIES = 1 << 1,
+    SWATCHER_WATCH_SYMLINKS = 1 << 2
+
+} swatcher_watch_option;
 
 typedef struct swatcher_target
 {
     char *path;
+    char *pattern; // regex (depricated)
+    char **callback_patterns; // regex patterns for callback triggering
+    char **watch_patterns; // regex patterns for watched items
+    char **ignore_patterns; // regex patterns for items to be ignored
     bool is_recursive;
-
-    uint32_t events;     // Bitmask of swatcher_fs_event values
+    swatcher_fs_event events;     // Bitmask of swatcher_fs_event values
+    swatcher_watch_option watch_options;
     void *user_data;     // User data for callback usage
     void *platform_data; // For internal use by the library
-
-    int debounce_timeout_ms;
     time_t last_event_time;
+
+    UT_hash_handle hh_global; // internal use
+    UT_hash_handle hh_inner; // internal use
+    struct swatcher_target *inner_targets;
 
     bool is_symlink;
     bool is_file;
     bool is_directory;
-    char *pattern; // regex
+    bool follow_symlinks;
 
-    void (*callback)(swatcher_fs_event, struct swatcher_target *, const char *event_name);
+    void (*callback)(swatcher_fs_event, struct swatcher_target *, const char *event_name, void *additional_data);
 } swatcher_target;
 
 typedef struct swatcher_target_desc
@@ -59,18 +79,16 @@ typedef struct swatcher_target_desc
     bool is_recursive;
     // uint32_t events;
     swatcher_fs_event events;
+    swatcher_watch_option watch_options;
+    char *pattern; // regex (depricated)
+    char **callback_patterns; // regex patterns for callback triggering
+    char **watch_patterns; // regex patterns for watched items
+    char **ignore_patterns; // regex patterns for items to be ignored
     void *user_data;
-    int debounce_timeout_ms;
-    char *pattern; // regex
     bool follow_symlinks;
-    void (*callback)(swatcher_fs_event, struct swatcher_target *, const char *event_name);
-} swatcher_target_desc;
 
-typedef struct swatcher_target_node
-{
-    swatcher_target *target;
-    struct swatcher_target_node *next;
-} swatcher_target_node;
+    void (*callback)(swatcher_fs_event, struct swatcher_target *, const char *event_name, void *additional_data);
+} swatcher_target_desc;
 
 typedef struct swatcher_config
 {
@@ -81,9 +99,9 @@ typedef struct swatcher_config
 typedef struct swatcher
 {
     bool running;
-    // swatcher_target *targets;
-    swatcher_target_node *targets_head;
+    swatcher_target *targets;
     swatcher_config *config;
+
     void *platform_data; // For internal use by the library
 } swatcher;
 
@@ -157,8 +175,8 @@ void swatcher_log_default(swatcher_log_level level, const char *file, int line, 
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
     // fprintf(stderr, "[%02d:%02d:%02d %s:%d] ", t->tm_hour, t->tm_min, t->tm_sec, file, line);
-    // fprintf(stderr, "[%02d:%02d:%02d %s:%d] ", t->tm_hour, t->tm_min, t->tm_sec, file, line);
-    fprintf(stderr, "[%02d:%02d:%02d] ", t->tm_hour, t->tm_min, t->tm_sec);
+    fprintf(stderr, "[%02d:%02d:%02d %s:%d] ", t->tm_hour, t->tm_min, t->tm_sec, file, line);
+    // fprintf(stderr, "[%02d:%02d:%02d] ", t->tm_hour, t->tm_min, t->tm_sec);
 
     va_list args;
     va_start(args, format);
@@ -178,23 +196,36 @@ void swatcher_log_default(swatcher_log_level level, const char *file, int line, 
 #define SWATCHER_LOG_DEFAULT_INFO(fmt, ...) swatcher_log_default(LOG_INFO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define SWATCHER_LOG_DEFAULT_DEBUG(fmt, ...) swatcher_log_default(LOG_DEBUG, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
-bool is_pattern_matched(const char *pattern, const char *string)
+bool is_pattern_matched(char **patterns, const char *string)
 {
     regex_t regex;
-    int ret;
+    bool matched = false;
 
-    ret = regcomp(&regex, pattern, REG_EXTENDED);
-    if (ret)
+    for (size_t i = 0; patterns[i] != NULL; i++)
     {
-        // Handle regex compilation error
-        SWATCHER_LOG_DEFAULT_ERROR("Failed to compile regex: %s", pattern);
-        return false;
+        int ret;
+
+        // SWATCHER_LOG_DEFAULT_DEBUG("Matching pattern: %s with %s", patterns[i], string);
+
+        ret = regcomp(&regex, patterns[i], REG_EXTENDED);
+        if (ret)
+        {
+            // Handle regex compilation error
+            SWATCHER_LOG_DEFAULT_ERROR("Failed to compile regex: %s", patterns[i]);
+            return false;
+        }
+
+        ret = regexec(&regex, string, 0, NULL, 0);
+        regfree(&regex);
+
+        if (ret == 0)
+        {
+            matched = true;
+            break;
+        }
     }
 
-    ret = regexec(&regex, string, 0, NULL, 0);
-    regfree(&regex);
-
-    return ret == 0;
+    return matched;
 }
 
 const char *get_event_name(swatcher_fs_event event)
@@ -233,7 +264,7 @@ bool swatcher_init(swatcher *swatcher, swatcher_config *config);
 void swatcher_stop(swatcher *swatcher);
 void swatcher_cleanup(swatcher *swatcher);
 bool swatcher_is_absolute_path(const char *path);
-bool swatcher_validate_and_normalize_path(const char *input_path, char *normalized_path);
+bool swatcher_validate_and_normalize_path(const char *input_path, char *normalized_path, bool resolve_symlinks);
 
 swatcher_target *swatcher_target_create(swatcher_target_desc *desc);
 
