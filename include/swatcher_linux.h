@@ -5,6 +5,12 @@
 #include <pthread.h>
 #include <dirent.h>
 #include <poll.h>
+#include <regex.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct swatcher_target_linux
 {
     int wd;
@@ -21,15 +27,44 @@ typedef struct swatcher_linux
     swatcher_target_linux *wd_to_target;
 } swatcher_linux;
 
+#ifdef __cplusplus
+}
+#endif
+
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define BUF_LEN (1024 * (EVENT_SIZE + 16))
 #define DIR_BREAK '/'
 
-bool is_already_watched(swatcher *swatcher, const char *path)
+bool is_pattern_matched(char **patterns, const char *string)
 {
-    swatcher_target *target = NULL;
-    HASH_FIND(hh_global, swatcher->targets, path, strlen(path), target);
-    return target != NULL;
+    regex_t regex;
+    bool matched = false;
+
+    for (size_t i = 0; patterns[i] != NULL; i++)
+    {
+        int ret;
+
+        // SWATCHER_LOG_DEFAULT_DEBUG("Matching pattern: %s with %s", patterns[i], string);
+
+        ret = regcomp(&regex, patterns[i], REG_EXTENDED);
+        if (ret)
+        {
+            // Handle regex compilation error
+            SWATCHER_LOG_DEFAULT_ERROR("Failed to compile regex: %s", patterns[i]);
+            return false;
+        }
+
+        ret = regexec(&regex, string, 0, NULL, 0);
+        regfree(&regex);
+
+        if (ret == 0)
+        {
+            matched = true;
+            break;
+        }
+    }
+
+    return matched;
 }
 
 uint32_t swatcher_target_events_to_inotify_mask(swatcher_target *target)
@@ -804,7 +839,6 @@ bool swatcher_init(swatcher *swatcher, swatcher_config *config)
 
     swatcher->targets = NULL;
     swatcher->config = config;
-    swatcher->targets = NULL;
 
     return true;
 }
@@ -970,23 +1004,6 @@ swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
         free(target);
         return NULL;
     }
-
-    // if (desc->pattern == 0)
-    // {
-    //     target->pattern = NULL;
-    // }
-    // else
-    // {
-    //     target->pattern = strdup(desc->pattern);
-    //     if (target->pattern == NULL)
-    //     {
-    //         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate pattern (regex string)");
-    //         free(target->path);
-    //         free(target);
-    //         return NULL;
-    //     }
-    // }
-    // char **callback_patterns; // regex patterns for callback triggering
 
     if (desc->callback_patterns == 0)
     {

@@ -1,6 +1,12 @@
+#define _CRTDBG_MAP_ALLOC
+// #define __cplusplus
 #include <stdio.h>
 #include <swatcher.h>
 #include <signal.h>
+#include <crtdbg.h>
+#ifdef _WIN32
+#include <conio.h>
+#endif
 
 static swatcher *global_watcher = NULL;
 
@@ -28,10 +34,10 @@ void my_callback_function(swatcher_fs_event event, swatcher_target *target, cons
         SWATCHER_LOG_DEFAULT_INFO("Event: %s", get_event_name(event));
         SWATCHER_LOG_DEFAULT_INFO("Target path: %s", target->path);
         SWATCHER_LOG_DEFAULT_INFO("Event name: %s", eventname);
-        struct inotify_event *ievent = (struct inotify_event *) additional_data;
+        // struct inotify_event *ievent = (struct inotify_event *) additional_data;
 
-        SWATCHER_LOG_DEFAULT_INFO("inotify event name: %s", ievent->name);
-        SWATCHER_LOG_DEFAULT_INFO("inotify event mask: %d", ievent->mask);
+        // SWATCHER_LOG_DEFAULT_INFO("inotify event name: %s", ievent->name);
+        // SWATCHER_LOG_DEFAULT_INFO("inotify event mask: %d", ievent->mask);
     // }
 }
 
@@ -41,7 +47,8 @@ int main()
     global_watcher = malloc(sizeof(swatcher));
     // char *path = "/home/timelord/projects/swatcher/examples/test";
     // char *path = "/home/timelord/projects/swatcher/examples/editorconfig";
-    char *path = "../examples/test/";
+    // char *path = "../examples/test/";
+    char *path = "C:\\Users\\seems\\swatcher\\examples\\test";
     // char *path = "/home/timelord/projects/work/host-staffing/host-staffing-ui";
     // char *path = "/home/timelord/projects/work/host-staffing/host-staffing-ui/node_modules/editorconfig/node_modules";
     swatcher_config config = {
@@ -65,27 +72,36 @@ int main()
 
     swatcher_target *target = swatcher_target_create(&(swatcher_target_desc){
         .path = path,
-        .is_recursive = true,
+        .is_recursive = false,
         .events = SWATCHER_EVENT_DELETED | SWATCHER_EVENT_CREATED | SWATCHER_EVENT_MODIFIED | SWATCHER_EVENT_MOVED,
-        // .pattern = ".*\\.txt$",
         // .callback_patterns = REGEX_PATTERNS(".*\\.txt$", ".*\\.c$", ".*\\.h$"),
         // .watch_patterns = REGEX_PATTERNS(".*\\.txt$"),
-        .ignore_patterns = REGEX_PATTERNS(".*\\.txt$"),
-        .watch_options = SWATCHER_WATCH_ALL,
-        .follow_symlinks = false,
+        // .ignore_patterns = REGEX_PATTERNS(".*\\.txt$"),
+        // .watch_options = SWATCHER_WATCH_ALL,
+        // .follow_symlinks = false,
         .user_data = "Hello, world (user data)!",
         .callback = my_callback_function});
+    
     swatcher_add(global_watcher, target);
-
     swatcher_start(global_watcher);
 
+    // getchar();
+    #ifdef _WIN32
+    _getch(); // Use _getch() on Windows
+    #else
+    getchar(); // Use getchar() on Linux
+    #endif
 
-    getchar();
+    SWATCHER_LOG_DEFAULT_INFO("Removing swatcher...");
 
     swatcher_remove(global_watcher, target);
+    SWATCHER_LOG_DEFAULT_INFO("Stopping swatcher...");
     swatcher_stop(global_watcher);
 
+    SWATCHER_LOG_DEFAULT_INFO("Cleaning up swatcher...");
     swatcher_cleanup(global_watcher);
+
+    // _CrtDumpMemoryLeaks();
 
     return EXIT_SUCCESS;
 }
