@@ -3,8 +3,8 @@
 #include <stdio.h>
 #include <swatcher.h>
 #include <signal.h>
-#include <crtdbg.h>
 #ifdef _WIN32
+// #include <crtdbg.h>
 #include <conio.h>
 #endif
 

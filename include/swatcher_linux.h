@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <poll.h>
 #include <regex.h>
+#include <swatcher_common.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,6 +18,7 @@ typedef struct swatcher_target_linux
     swatcher_target *target;
     UT_hash_handle hh;
 } swatcher_target_linux;
+
 typedef struct swatcher_linux
 {
     int inotify_fd;
@@ -532,6 +534,7 @@ bool add_watch_recursive(swatcher *swatcher, swatcher_target *target, bool dont_
 
     return result;
 }
+
 
 bool swatcher_add(swatcher *swatcher, swatcher_target *target)
 {

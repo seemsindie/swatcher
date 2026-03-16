@@ -20,6 +20,7 @@
 - [ ] Benchmarks
 - [ ] C++ support (...)
 - [ ] More platforms (BSD, Web...)
+- [ ] Better linux recursive watching (dynamic add/remove for create/delete events)
 
 ### Prerequisites
 

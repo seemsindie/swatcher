@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <crtdbg.h>
+#include <swatcher_common.h>
 // #define BUF_LEN 4096
 #define BUFFER_SIZE (1024 * 1024)
 
