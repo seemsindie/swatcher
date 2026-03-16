@@ -14,20 +14,10 @@ typedef struct swatcher_backend {
     void *(*thread_func)(void *arg);
 } swatcher_backend;
 
-/* Backend constructors */
-#if defined(__linux__) || defined(__unix__) || defined(__unix) || defined(unix)
+/* Backend constructors — only the platform-relevant one is defined */
 const swatcher_backend *swatcher_backend_inotify(void);
-#endif
-
-#if defined(__APPLE__)
 const swatcher_backend *swatcher_backend_fsevents(void);
-#endif
-
-#if defined(_WIN32) || defined(_WIN64)
 const swatcher_backend *swatcher_backend_win32(void);
-#endif
-
-/* Returns the default backend for the current platform */
 const swatcher_backend *swatcher_backend_default(void);
 
 #endif /* SWATCHER_BACKEND_H */

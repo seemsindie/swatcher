@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* Opaque platform types */
 typedef struct sw_mutex sw_mutex;
@@ -56,6 +57,9 @@ typedef struct sw_dir_entry {
 sw_dir *sw_dir_open(const char *path);
 bool sw_dir_next(sw_dir *d, sw_dir_entry *entry);
 void sw_dir_close(sw_dir *d);
+
+/* Monotonic time (milliseconds) */
+uint64_t sw_time_now_ms(void);
 
 /* String */
 char *sw_strdup(const char *s);

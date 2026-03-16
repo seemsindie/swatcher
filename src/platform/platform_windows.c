@@ -194,6 +194,13 @@ void sw_dir_close(sw_dir *d)
     free(d);
 }
 
+/* ========== Monotonic time ========== */
+
+uint64_t sw_time_now_ms(void)
+{
+    return (uint64_t)GetTickCount64();
+}
+
 /* ========== String ========== */
 
 char *sw_strdup(const char *s)

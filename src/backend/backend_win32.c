@@ -269,7 +269,7 @@ static void *win32_thread_func(void *arg)
         return NULL;
     }
 
-    while (sw->running) {
+    while (sw_atomic_load(&sw->running)) {
         memcpy(tempHandles, w->events, w->num_events * sizeof(HANDLE));
         tempHandles[w->num_events] = w->terminationEvent;
 

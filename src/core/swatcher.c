@@ -31,7 +31,7 @@ SWATCHER_API bool swatcher_init(swatcher *sw, swatcher_config *config)
     si->targets = NULL;
 
     sw->_internal = si;
-    sw->running = false;
+    sw_atomic_store(&sw->running, false);
     sw->config = config;
 
     if (!si->backend->init(sw)) {
@@ -54,11 +54,11 @@ SWATCHER_API bool swatcher_start(swatcher *sw)
 
     swatcher_internal *si = SW_INTERNAL(sw);
 
-    sw->running = true;
+    sw_atomic_store(&sw->running, true);
     si->thread = sw_thread_create(si->backend->thread_func, sw);
     if (!si->thread) {
         SWATCHER_LOG_DEFAULT_ERROR("Failed to create watcher thread");
-        sw->running = false;
+        sw_atomic_store(&sw->running, false);
         return false;
     }
 
@@ -70,7 +70,7 @@ SWATCHER_API void swatcher_stop(swatcher *sw)
     if (!sw || !sw->_internal) return;
 
     swatcher_internal *si = SW_INTERNAL(sw);
-    sw->running = false;
+    sw_atomic_store(&sw->running, false);
 
     if (si->thread) {
         sw_thread_join(si->thread);

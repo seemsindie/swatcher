@@ -171,6 +171,15 @@ void sw_dir_close(sw_dir *d)
     free(d);
 }
 
+/* ========== Monotonic time ========== */
+
+uint64_t sw_time_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
 /* ========== String ========== */
 
 char *sw_strdup(const char *s)

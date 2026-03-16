@@ -396,7 +396,7 @@ static void *inotify_thread_func(void *arg)
     swatcher_inotify *ino = INOTIFY_DATA(sw);
     char buffer[BUF_LEN];
 
-    while (sw->running) {
+    while (sw_atomic_load(&sw->running)) {
         int poll_ret = poll(&ino->fds, 1, sw->config->poll_interval_ms);
         if (poll_ret < 0) {
             SWATCHER_LOG_DEFAULT_ERROR("poll failed");

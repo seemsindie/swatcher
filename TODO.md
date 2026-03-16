@@ -45,7 +45,7 @@
 ## Phase 0: Foundation & Cleanup
 > Restructure the project so everything else builds on solid ground.
 
-- [ ] **0.1** Define directory structure:
+- [x] **0.1** Define directory structure:
   ```
   include/
     swatcher.h          (public API - declarations only)
@@ -83,7 +83,7 @@
     patterns.c
     multi_target.c
   ```
-- [ ] **0.2** Define the backend vtable interface (`backend.h`):
+- [x] **0.2** Define the backend vtable interface (`backend.h`):
   ```c
   typedef struct swatcher_backend {
       const char *name;
@@ -95,7 +95,7 @@
       // Returns number of events dispatched, -1 on error
   } swatcher_backend;
   ```
-- [ ] **0.3** Define the platform abstraction interface (`platform.h`):
+- [x] **0.3** Define the platform abstraction interface (`platform.h`):
   - `sw_thread_create / join / detach`
   - `sw_mutex_init / lock / unlock / destroy`
   - `sw_dir_open / read / close` (directory iteration)
@@ -103,34 +103,29 @@
   - `sw_stat` (file info: type, size, mtime)
   - `sw_time_now_ms` (monotonic clock)
   - `sw_atomic_load / store / cas` (atomics for lock-free flags)
-- [ ] **0.4** Clean up public types (`swatcher_types.h`):
+- [x] **0.4** Clean up public types (`swatcher_types.h`):
   - Audit `swatcher_fs_event` — remove `ALL_INOTIFY`, make events platform-neutral
   - Clean up `swatcher_target` — remove platform_data from public struct, use opaque pointer
   - Remove uthash handles from public struct
   - Add `swatcher_error` enum for error reporting
-- [ ] **0.5** Port existing Linux inotify code into `backend_inotify.c` using new interfaces
-- [ ] **0.6** Port existing Windows code into `backend_win32.c` using new interfaces
-- [ ] **0.7** Update CMakeLists.txt:
+- [x] **0.5** Port existing Linux inotify code into `backend_inotify.c` using new interfaces
+- [x] **0.6** Port existing Windows code into `backend_win32.c` using new interfaces
+- [x] **0.7** Update CMakeLists.txt:
   - Proper source file lists per platform
   - `target_compile_definitions` for platform detection
   - Install targets (headers + lib)
   - C11 standard (for atomics, anonymous structs)
   - Compiler warnings: `-Wall -Wextra -Wpedantic -Werror` / `/W4 /WX`
-- [ ] **0.8** Verify the restructured code compiles and runs on Linux + Windows
+- [x] **0.8** Verify the restructured code compiles and runs on Linux + Windows
 
 ---
 
 ## Phase 1: Portable Regex / Pattern Engine
 > Solve the `regex.h` problem once and for all.
 
-- [ ] **1.1** Evaluate and select a bundled regex engine:
-  - Option A: **tiny-regex-c** (~500 lines, public domain, basic regex)
-  - Option B: **SLRE** (~600 lines, GPL → might need alt license)
-  - Option C: **Custom glob matcher** (simpler, more natural for file patterns)
-  - Option D: **re** (Plan 9 regex, ~300 lines, very simple)
-  - Criteria: size < 1000 LOC, no allocations in hot path, permissive license
-- [ ] **1.2** Integrate chosen engine into `src/regex/`
-- [ ] **1.3** Build `pattern.c` — unified pattern matching API:
+- [x] **1.1** Evaluate and select a bundled regex engine: **tiny-regex-c** (public domain, ~500 LOC, modified for malloc-based compilation)
+- [x] **1.2** Integrate chosen engine into `src/regex/` (re.h, re.c — vendored with heap-allocated compile)
+- [x] **1.3** Build `pattern.c` — unified pattern matching API:
   ```c
   typedef struct sw_pattern {
       // opaque compiled pattern
@@ -143,14 +138,14 @@
   // Convenience: match against NULL-terminated array of patterns
   bool sw_patterns_any_match(sw_pattern *patterns[], const char *str);
   ```
-- [ ] **1.4** Pre-compile patterns at target creation time (not on every event)
-- [ ] **1.5** Add glob-to-regex convenience wrapper:
+- [x] **1.4** Pre-compile patterns at target creation time (not on every event)
+- [x] **1.5** Add glob-to-regex convenience wrapper (auto-detected in sw_patterns_compile):
   ```c
   // Converts "*.txt" → "^.*\\.txt$"
   bool sw_glob_to_regex(const char *glob, char *regex_buf, size_t buf_size);
   ```
-- [ ] **1.6** Write pattern tests (test_pattern.c)
-- [ ] **1.7** Verify patterns work on all three platforms
+- [x] **1.6** Write pattern tests (test_pattern.c) — 15 tests, valgrind clean
+- [ ] **1.7** Verify patterns work on all three platforms (Linux done, Windows/macOS pending)
 
 ---
 
@@ -462,17 +457,18 @@ Phase 12 (Platforms)     ████        ← future expansion
 
 ---
 
-## Current State (as of 2026-03-16)
+## Current State (as of 2026-03-17)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Linux inotify | ~80% done | Works but needs restructuring, recursive watching incomplete |
-| Windows ReadDirChanges | ~70% done | Works but no regex, 64-handle limit |
-| macOS FSEvents | ~10% done | Skeleton only, broken references |
+| **Phase 0: Restructuring** | **DONE** | .c/.h split, backend vtable, PAL interface, CMake |
+| **Phase 1: Portable Regex** | **DONE** | tiny-regex-c vendored, pre-compiled patterns, glob support, 15 tests, valgrind clean |
+| Phase 2: PAL | ~70% | Core PAL works (threads, mutex, paths, dirs, stat). Missing: monotonic time, atomics. #ifdef leaks in swatcher_types.h, backend.h |
+| Linux inotify | ~90% | Restructured, uses compiled patterns, recursive watching works |
+| Windows ReadDirChanges | ~80% | Restructured, callback pattern filtering added, 64-handle limit remains |
+| macOS FSEvents | ~10% | Skeleton only |
 | macOS kqueue | 0% | Not started |
 | Poll fallback | 0% | Not started |
-| Portable regex | 0% | Blocked on Windows, needs bundled engine |
-| Platform abstraction | 0% | #ifdefs scattered through headers |
-| Tests | 0% | None exist |
-| Build system | ~40% | CMake works but needs platform conditionals |
+| Tests | ~15% | test_pattern.c done (15 tests), need platform + integration tests |
+| Build system | ~70% | CMake works, per-platform source selection, test targets |
 | Documentation | ~20% | README exists, no API docs |

@@ -5,6 +5,24 @@
 #include <stdint.h>
 #include <time.h>
 
+/* Atomic bool — used for cross-thread flags like sw->running */
+#if defined(_MSC_VER)
+  #include <intrin.h>
+  typedef volatile long sw_atomic_bool;
+  #define sw_atomic_load(p)       (_InterlockedOr((p), 0) != 0)
+  #define sw_atomic_store(p, v)   _InterlockedExchange((p), (long)(v))
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_ATOMICS__)
+  #include <stdatomic.h>
+  typedef _Atomic bool sw_atomic_bool;
+  #define sw_atomic_load(p)       atomic_load(p)
+  #define sw_atomic_store(p, v)   atomic_store((p), (v))
+#else
+  /* GCC/Clang intrinsics fallback */
+  typedef volatile int sw_atomic_bool;
+  #define sw_atomic_load(p)       (__sync_add_and_fetch((p), 0) != 0)
+  #define sw_atomic_store(p, v)   __sync_lock_test_and_set((p), (int)(v))
+#endif
+
 #ifdef _WIN32
 #ifdef SWATCHER_BUILD_DLL
 #define SWATCHER_API __declspec(dllexport)
@@ -95,7 +113,7 @@ typedef struct swatcher_config {
 } swatcher_config;
 
 typedef struct swatcher {
-    bool running;
+    sw_atomic_bool running;
     swatcher_config *config;
     void *_internal;
 } swatcher;
