@@ -86,9 +86,10 @@ SWATCHER_API bool swatcher_add(swatcher *sw, swatcher_target *target)
 
     sw_mutex_lock(si->mutex);
 
-    swatcher_target_internal *ti = sw_target_internal_create(target);
+    /* Internal struct (with compiled patterns) is created in swatcher_target_create() */
+    swatcher_target_internal *ti = SW_TARGET_INTERNAL(target);
     if (!ti) {
-        SWATCHER_LOG_DEFAULT_ERROR("Failed to create target internal");
+        SWATCHER_LOG_DEFAULT_ERROR("Target has no internal struct");
         sw_mutex_unlock(si->mutex);
         return false;
     }
@@ -100,10 +101,6 @@ SWATCHER_API bool swatcher_add(swatcher *sw, swatcher_target *target)
         result = si->backend->add_target_recursive(sw, target, dont_add_self);
     } else {
         result = si->backend->add_target(sw, target);
-    }
-
-    if (!result) {
-        sw_target_internal_destroy(ti);
     }
 
     sw_mutex_unlock(si->mutex);
@@ -144,7 +141,7 @@ SWATCHER_API void swatcher_cleanup(swatcher *sw)
         HASH_DELETE(hh_global, si->targets, current);
         free(current->target->path);
         free(current->target);
-        free(current);
+        sw_target_internal_destroy(current);
     }
 
     si->backend->destroy(sw);

@@ -30,8 +30,9 @@
 #define SWATCHER_LOG_DEFAULT_INFO(fmt, ...)    swatcher_log_default(SW_LOG_INFO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define SWATCHER_LOG_DEFAULT_DEBUG(fmt, ...)   swatcher_log_default(SW_LOG_DEBUG, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
-/* ---------- Regex pattern helper ---------- */
+/* ---------- Pattern helpers ---------- */
 #define REGEX_PATTERNS(...) ((char *[]){__VA_ARGS__, NULL})
+#define GLOB_PATTERNS(...)  ((char *[]){__VA_ARGS__, NULL})
 
 #ifdef __cplusplus
 extern "C" {

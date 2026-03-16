@@ -52,12 +52,23 @@ SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
     target->follow_symlinks = desc->follow_symlinks;
     target->_internal = NULL;
 
+    /* Create internal struct early so compiled patterns are available
+     * before backends start recursive directory traversal. */
+    if (!sw_target_internal_create(target)) {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to create target internal for %s", target->path);
+        free(target->path);
+        free(target);
+        return NULL;
+    }
+
     return target;
 }
 
 SWATCHER_API void swatcher_target_destroy(swatcher_target *target)
 {
     if (!target) return;
+    if (target->_internal)
+        sw_target_internal_destroy(SW_TARGET_INTERNAL(target));
     free(target->path);
     free(target);
 }
@@ -75,6 +86,9 @@ swatcher_target_internal *sw_target_internal_create(swatcher_target *target)
     ti->path = target->path;
     ti->backend_data = NULL;
     memset(&ti->hh_global, 0, sizeof(ti->hh_global));
+    ti->compiled_callback = sw_patterns_compile(target->callback_patterns);
+    ti->compiled_watch    = sw_patterns_compile(target->watch_patterns);
+    ti->compiled_ignore   = sw_patterns_compile(target->ignore_patterns);
     target->_internal = ti;
     return ti;
 }
@@ -82,6 +96,9 @@ swatcher_target_internal *sw_target_internal_create(swatcher_target *target)
 void sw_target_internal_destroy(swatcher_target_internal *ti)
 {
     if (!ti) return;
+    sw_patterns_free(ti->compiled_callback);
+    sw_patterns_free(ti->compiled_watch);
+    sw_patterns_free(ti->compiled_ignore);
     if (ti->target)
         ti->target->_internal = NULL;
     free(ti);

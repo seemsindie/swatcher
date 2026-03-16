@@ -15,6 +15,7 @@ set(CORE_SOURCES
     src/core/event.c
     src/core/target.c
     src/core/pattern.c
+    src/regex/re.c
 )
 
 # Platform sources
@@ -71,6 +72,10 @@ endif()
 # Example
 add_executable(swatcher_first examples/swatcher_first.c)
 target_link_libraries(swatcher_first swatcher)
+
+# Pattern tests
+add_executable(test_pattern tests/test_pattern.c src/core/pattern.c src/regex/re.c src/core/log.c)
+target_include_directories(test_pattern PRIVATE include src)
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})

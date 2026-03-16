@@ -5,6 +5,7 @@
 #include "uthash.h"
 #include "../platform/platform.h"
 #include "../backend/backend.h"
+#include "../core/pattern.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,9 @@ typedef struct swatcher_target_internal {
     char *path;              /* hash key */
     void *backend_data;
     UT_hash_handle hh_global;
+    sw_compiled_patterns *compiled_callback;
+    sw_compiled_patterns *compiled_watch;
+    sw_compiled_patterns *compiled_ignore;
 } swatcher_target_internal;
 
 typedef struct swatcher_internal {

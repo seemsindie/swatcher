@@ -2,6 +2,7 @@
 
 #include "swatcher.h"
 #include "../internal/internal.h"
+#include "../core/pattern.h"
 
 #include <windows.h>
 
@@ -81,11 +82,18 @@ static void process_directory_changes(const char *buffer, DWORD bytesReturned, s
 
         swatcher_fs_event event = action_to_swatcher_event(fni->Action);
         if (event != SWATCHER_EVENT_NONE && sw_target_win->target->callback) {
-            sw_target_win->target->callback(event, sw_target_win->target, fullpath, fni);
+            swatcher_target_internal *ti = SW_TARGET_INTERNAL(sw_target_win->target);
+            if (ti && ti->compiled_callback) {
+                if (sw_pattern_matched(ti->compiled_callback, filenameUTF8)) {
+                    sw_target_win->target->callback(event, sw_target_win->target, fullpath, fni);
+                    sw_target_win->target->last_event_time = time(NULL);
+                }
+            } else {
+                sw_target_win->target->callback(event, sw_target_win->target, fullpath, fni);
+                sw_target_win->target->last_event_time = time(NULL);
+            }
         }
         free(filenameUTF8);
-
-        sw_target_win->target->last_event_time = time(NULL);
         p += fni->NextEntryOffset;
     } while (fni->NextEntryOffset != 0);
 }

@@ -8,8 +8,8 @@
 #include <poll.h>
 #include <errno.h>
 
-/* Declared in pattern.c */
-extern bool is_pattern_matched(char **patterns, const char *string);
+/* Pattern matching via compiled patterns */
+#include "../core/pattern.h"
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define BUF_LEN    (1024 * (EVENT_SIZE + 16))
@@ -129,13 +129,13 @@ static bool inotify_add_recursive_locked(swatcher *sw, swatcher_target *original
 
     sw_dir_entry entry;
     while (sw_dir_next(dir, &entry)) {
-        if (original_target->ignore_patterns) {
-            if (is_pattern_matched(original_target->ignore_patterns, entry.name))
+        if (SW_TARGET_INTERNAL(original_target)->compiled_ignore) {
+            if (sw_pattern_matched(SW_TARGET_INTERNAL(original_target)->compiled_ignore, entry.name))
                 continue;
         }
 
-        if (!original_target->watch_patterns ||
-            is_pattern_matched(original_target->watch_patterns, entry.name) ||
+        if (!SW_TARGET_INTERNAL(original_target)->compiled_watch ||
+            sw_pattern_matched(SW_TARGET_INTERNAL(original_target)->compiled_watch, entry.name) ||
             entry.is_dir) {
 
             if (entry.is_dir) {
@@ -170,8 +170,8 @@ static bool inotify_add_recursive_locked(swatcher *sw, swatcher_target *original
 
                 bool skip_self = (original_target->watch_options == SWATCHER_WATCH_FILES ||
                                   original_target->watch_options == SWATCHER_WATCH_SYMLINKS ||
-                                  (original_target->watch_patterns &&
-                                   !is_pattern_matched(original_target->watch_patterns, entry.name)));
+                                  (SW_TARGET_INTERNAL(original_target)->compiled_watch &&
+                                   !sw_pattern_matched(SW_TARGET_INTERNAL(original_target)->compiled_watch, entry.name)));
 
                 if (!inotify_add_recursive_locked(sw, new_target, skip_self)) {
                     SWATCHER_LOG_DEFAULT_WARNING("Failed to add watch for %s", new_target->path);
@@ -429,12 +429,12 @@ static void *inotify_thread_func(void *arg)
                 if ((target->events & sw_event) || (target->events == SWATCHER_EVENT_ALL)) {
                     const char *name = event->len > 0 ? event->name : NULL;
 
-                    if (target->callback_patterns && name) {
-                        if (is_pattern_matched(target->callback_patterns, name)) {
+                    if (SW_TARGET_INTERNAL(target)->compiled_callback && name) {
+                        if (sw_pattern_matched(SW_TARGET_INTERNAL(target)->compiled_callback, name)) {
                             target->callback(sw_event, target, name, event);
                             target->last_event_time = time(NULL);
                         }
-                    } else if (!target->callback_patterns) {
+                    } else if (!SW_TARGET_INTERNAL(target)->compiled_callback) {
                         target->callback(sw_event, target, name, event);
                         target->last_event_time = time(NULL);
                     }
