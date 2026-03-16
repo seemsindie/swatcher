@@ -1,0 +1,88 @@
+#include "swatcher.h"
+#include "../internal/internal.h"
+
+SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
+{
+    swatcher_target *target = malloc(sizeof(swatcher_target));
+    if (!target) {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_target");
+        return NULL;
+    }
+
+    char normalized_path[SW_PATH_MAX];
+    if (!sw_path_normalize(desc->path, normalized_path, SW_PATH_MAX, desc->follow_symlinks)) {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to normalize path: %s", desc->path);
+        free(target);
+        return NULL;
+    }
+
+    sw_file_info info;
+    if (!sw_stat(normalized_path, &info, desc->follow_symlinks)) {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to stat path: %s", normalized_path);
+        free(target);
+        return NULL;
+    }
+
+    target->is_file = info.is_file;
+    target->is_directory = info.is_directory;
+    target->is_symlink = info.is_symlink;
+
+    target->path = sw_strdup(normalized_path);
+    if (!target->path) {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate path (string)");
+        free(target);
+        return NULL;
+    }
+
+    target->callback_patterns = desc->callback_patterns ? desc->callback_patterns : NULL;
+    target->watch_patterns = desc->watch_patterns ? desc->watch_patterns : NULL;
+    target->ignore_patterns = desc->ignore_patterns ? desc->ignore_patterns : NULL;
+
+    if (desc->watch_options == 0)
+        target->watch_options = SWATCHER_WATCH_ALL;
+    else
+        target->watch_options = desc->watch_options;
+
+    target->is_recursive = desc->is_recursive;
+    target->events = desc->events;
+    target->watch_options = desc->watch_options;
+    target->user_data = desc->user_data;
+    target->callback = desc->callback;
+    target->last_event_time = time(NULL);
+    target->follow_symlinks = desc->follow_symlinks;
+    target->_internal = NULL;
+
+    return target;
+}
+
+SWATCHER_API void swatcher_target_destroy(swatcher_target *target)
+{
+    if (!target) return;
+    free(target->path);
+    free(target);
+}
+
+SWATCHER_API bool swatcher_is_watched(swatcher *sw, const char *path)
+{
+    return sw_find_target_internal(sw, path) != NULL;
+}
+
+swatcher_target_internal *sw_target_internal_create(swatcher_target *target)
+{
+    swatcher_target_internal *ti = malloc(sizeof(swatcher_target_internal));
+    if (!ti) return NULL;
+    ti->target = target;
+    ti->path = target->path;
+    ti->backend_data = NULL;
+    memset(&ti->hh_global, 0, sizeof(ti->hh_global));
+    target->_internal = ti;
+    return ti;
+}
+
+void sw_target_internal_destroy(swatcher_target_internal *ti)
+{
+    if (!ti) return;
+    if (ti->target)
+        ti->target->_internal = NULL;
+    free(ti);
+}
