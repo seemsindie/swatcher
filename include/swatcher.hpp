@@ -1,5 +1,5 @@
 /*
- * swatcher.hpp — C++17 header-only wrapper for swatcher
+ * swatcher.hpp — C++20 header-only wrapper for swatcher
  *
  * Usage:
  *   sw::Watcher w;

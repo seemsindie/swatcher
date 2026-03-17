@@ -142,7 +142,7 @@ if(CMAKE_CXX_COMPILER)
     add_executable(swatcher_cpp_example examples/swatcher_cpp.cpp)
     target_link_libraries(swatcher_cpp_example swatcher)
     set_target_properties(swatcher_cpp_example PROPERTIES
-        CXX_STANDARD 17
+        CXX_STANDARD 20
         CXX_STANDARD_REQUIRED ON
     )
 endif()
