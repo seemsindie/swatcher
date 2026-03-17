@@ -114,27 +114,27 @@ zig build
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Public API (swatcher.h)               │
-│  swatcher_create / start / stop / destroy / add / remove│
-├─────────────────────────────────────────────────────────┤
-│                     Core Layer                           │
-│  Event dispatch, pattern matching, target management,   │
-│  coalescing, error handling                             │
-├──────────────┬──────────────────────────────────────────┤
-│ Pattern Engine│  Bundled regex (portable, no regex.h)   │
-│ (re.h)       │  + glob convenience wrapper             │
-├──────────────┴──────────────────────────────────────────┤
-│                   Backend Interface                      │
-│  swatcher_backend { init, add, remove, poll, destroy }  │
-├────────┬─────────┬─────────┬──────────┬────────────────┤
-│inotify │ kqueue  │fsevents │  Win32   │  poll (stat)   │
-│(Linux) │(macOS/  │(macOS)  │  (IOCP)  │  (fallback,    │
-│        │ BSD)    │         │          │   portable)    │
-├────────┴─────────┴─────────┴──────────┴────────────────┤
-│                  Platform Abstraction                    │
-│  Threads, mutexes, paths, dir iteration, time, atomics  │
-└─────────────────────────────────────────────────────────┘
++----------------------------------------------------------+
+|                 Public API (swatcher.h)                  |
+| swatcher_create / start / stop / destroy / add / remove  |
++----------------------------------------------------------+
+|                      Core Layer                          |
+| Event dispatch, pattern matching, target management,     |
+| coalescing, error handling                               |
++----------------+-----------------------------------------+
+| Pattern Engine | Bundled regex (portable, no regex.h)    |
+| (re.h)         | + glob convenience wrapper              |
++----------------+-----------------------------------------+
+|                   Backend Interface                      |
+| swatcher_backend { init, add, remove, poll, destroy }    |
++----------+---------+----------+--------+-----------------+
+| inotify  | kqueue  | fsevents | Win32  | poll (stat)     |
+| (Linux)  | (macOS/ | (macOS)  | (IOCP) | (fallback,      |
+|          |  BSD)   |          |        |  portable)      |
++----------+---------+----------+--------+-----------------+
+|                 Platform Abstraction                     |
+| Threads, mutexes, paths, dir iteration, time, atomics    |
++----------------------------------------------------------+
 ```
 
 ## Backends
