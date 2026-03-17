@@ -8,6 +8,30 @@
 #include <ctype.h>
 #include <windows.h>
 
+/* ========== UTF-8 <-> UTF-16 helpers ========== */
+
+static WCHAR *utf8_to_wide(const char *utf8)
+{
+    if (!utf8) return NULL;
+    int len = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (len <= 0) return NULL;
+    WCHAR *wide = malloc(len * sizeof(WCHAR));
+    if (!wide) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, len);
+    return wide;
+}
+
+static char *wide_to_utf8_alloc(const WCHAR *wide)
+{
+    if (!wide) return NULL;
+    int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
+    if (len <= 0) return NULL;
+    char *utf8 = malloc(len);
+    if (!utf8) return NULL;
+    WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, len, NULL, NULL);
+    return utf8;
+}
+
 /* ========== Mutex ========== */
 
 struct sw_mutex {
@@ -109,9 +133,12 @@ bool sw_path_normalize(const char *input, char *output, size_t size, bool resolv
     (void)resolve_symlinks; /* Windows: _fullpath resolves what it can */
 
     if (!sw_path_is_absolute(input)) {
-        char cwd[MAX_PATH];
-        if (GetCurrentDirectoryA(MAX_PATH, cwd) != 0) {
+        WCHAR cwd_wide[MAX_PATH];
+        if (GetCurrentDirectoryW(MAX_PATH, cwd_wide) != 0) {
+            char *cwd = wide_to_utf8_alloc(cwd_wide);
+            if (!cwd) return false;
             snprintf(output, size, "%s\\%s", cwd, input);
+            free(cwd);
             for (size_t i = 0; output[i] != '\0'; i++) {
                 if (output[i] == '/') output[i] = '\\';
             }
@@ -119,7 +146,7 @@ bool sw_path_normalize(const char *input, char *output, size_t size, bool resolv
             return false;
         }
     } else {
-        if (_fullpath(output, input, size) == NULL)
+        if (_fullpath(output, input, (int)size) == NULL)
             return false;
     }
     return true;
@@ -135,16 +162,22 @@ char sw_path_separator(void)
 bool sw_stat(const char *path, sw_file_info *info, bool follow_symlinks)
 {
     (void)follow_symlinks;
-    DWORD attr = GetFileAttributesA(path);
-    if (attr == INVALID_FILE_ATTRIBUTES)
+
+    WCHAR *wide_path = utf8_to_wide(path);
+    if (!wide_path) return false;
+
+    DWORD attr = GetFileAttributesW(wide_path);
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        free(wide_path);
         return false;
+    }
 
     info->is_directory = (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
     info->is_file = !info->is_directory;
     info->is_symlink = (attr & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
 
     WIN32_FILE_ATTRIBUTE_DATA fad;
-    if (GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) {
+    if (GetFileAttributesExW(wide_path, GetFileExInfoStandard, &fad)) {
         ULARGE_INTEGER li;
         li.LowPart = fad.nFileSizeLow;
         li.HighPart = fad.nFileSizeHigh;
@@ -158,6 +191,8 @@ bool sw_stat(const char *path, sw_file_info *info, bool follow_symlinks)
         info->size = 0;
         info->mtime = 0;
     }
+
+    free(wide_path);
     return true;
 }
 
@@ -165,19 +200,27 @@ bool sw_stat(const char *path, sw_file_info *info, bool follow_symlinks)
 
 struct sw_dir {
     HANDLE handle;
-    WIN32_FIND_DATAA ffd;
+    WIN32_FIND_DATAW ffd;
     bool first;
 };
 
 sw_dir *sw_dir_open(const char *path)
 {
-    char pattern[MAX_PATH];
-    snprintf(pattern, MAX_PATH, "%s\\*", path);
+    char pattern[SW_PATH_MAX];
+    snprintf(pattern, SW_PATH_MAX, "%s\\*", path);
+
+    WCHAR *wide_pattern = utf8_to_wide(pattern);
+    if (!wide_pattern) return NULL;
 
     sw_dir *d = malloc(sizeof(sw_dir));
-    if (!d) return NULL;
+    if (!d) {
+        free(wide_pattern);
+        return NULL;
+    }
 
-    d->handle = FindFirstFileA(pattern, &d->ffd);
+    d->handle = FindFirstFileW(wide_pattern, &d->ffd);
+    free(wide_pattern);
+
     if (d->handle == INVALID_HANDLE_VALUE) {
         free(d);
         return NULL;
@@ -191,12 +234,17 @@ bool sw_dir_next(sw_dir *d, sw_dir_entry *entry)
     if (d->first) {
         d->first = false;
     } else {
-        if (!FindNextFileA(d->handle, &d->ffd))
+        if (!FindNextFileW(d->handle, &d->ffd))
             return false;
     }
 
-    strncpy(entry->name, d->ffd.cFileName, sizeof(entry->name) - 1);
+    /* Convert filename from UTF-16 to UTF-8 */
+    char *utf8_name = wide_to_utf8_alloc(d->ffd.cFileName);
+    if (!utf8_name) return false;
+    strncpy(entry->name, utf8_name, sizeof(entry->name) - 1);
     entry->name[sizeof(entry->name) - 1] = '\0';
+    free(utf8_name);
+
     entry->is_dir = (d->ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     entry->is_file = !entry->is_dir;
     entry->is_symlink = (d->ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;

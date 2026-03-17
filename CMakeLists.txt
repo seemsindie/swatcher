@@ -126,6 +126,15 @@ if(APPLE)
     target_link_libraries(test_fsevents swatcher)
 endif()
 
+# Win32 backend tests (Windows only)
+if(WIN32)
+    add_executable(test_win32 tests/test_win32.c)
+    target_link_libraries(test_win32 swatcher)
+
+    add_executable(stress_win32 tests/stress_win32.c)
+    target_link_libraries(stress_win32 swatcher)
+endif()
+
 # Error reporting tests
 add_executable(test_error tests/test_error.c)
 target_link_libraries(test_error swatcher)

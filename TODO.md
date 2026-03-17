@@ -257,21 +257,16 @@
 ## Phase 7: Backend — ReadDirectoryChangesW (Windows)
 > Port and improve existing Windows implementation.
 
-- [ ] **7.1** Port existing `swatcher_windows.h` into `backend_win32.c` using backend vtable
-- [ ] **7.2** Fix the 64-handle limit (MAXIMUM_WAIT_OBJECTS):
-  - Use I/O Completion Ports (IOCP) instead of `WaitForMultipleObjects`
-  - Or use thread pool with smaller handle groups
-- [ ] **7.3** Add pattern matching support (now possible with portable regex from Phase 1)
-- [ ] **7.4** Handle network paths (UNC `\\server\share`):
-  - Detect and warn about higher latency
-  - Larger buffers for remote notifications
-- [ ] **7.5** Buffer overflow handling:
-  - Detect when `ReadDirectoryChangesW` buffer overflows
-  - Re-scan directory on overflow
-  - Emit overflow event
-- [ ] **7.6** Proper UTF-8 handling throughout (convert UTF-16 ↔ UTF-8)
-- [ ] **7.7** Write Windows backend tests
-- [ ] **7.8** Stress test with rapid file operations
+- [x] **7.1** Port existing `swatcher_windows.h` into `backend_win32.c` using backend vtable
+- [x] **7.2** Fix the 64-handle limit: migrated from `WaitForMultipleObjects` to I/O Completion Ports (IOCP) — scales to thousands of handles
+- [x] **7.3** Add pattern matching support (integrated in Phase 1, callback_patterns filtering)
+- [x] **7.4** Handle network paths (UNC `\\server\share`): detection + warning + larger 128KB buffers
+- [x] **7.5** Buffer overflow handling: detect `bytesReturned == 0`, emit `SWATCHER_EVENT_OVERFLOW`, re-issue watch
+- [x] **7.6** Proper UTF-8: `CreateFileW`/`GetFileAttributesW`/`FindFirstFileW` throughout PAL + backend, `MultiByteToWideChar`/`WideCharToMultiByte` with `CP_UTF8`
+- [x] **7.7** Write Windows backend tests — 9 tests (backend exists, overflow name, error codes, create/modify/delete/move, recursive, pattern filtering)
+- [x] **7.8** Stress test — 4 tests (500 rapid creates, 500 rapid modifies, 100 directories beyond IOCP limit, create+delete churn)
+- [x] **7.9** Event coalescing (ported from inotify — same merge rules, configurable `coalesce_ms`)
+- [x] **7.10** Error instrumentation (`sw_set_error` on all failure paths with `GetLastError()` in logs)
 
 ---
 
@@ -440,9 +435,9 @@ Phase 12 (Platforms)     ████        ← future expansion
 | **Phase 8: Core** | **DONE** | Error reporting, backend selection, ownership fix, all valgrind clean |
 | **C++ bindings** | **DONE** | Header-only `swatcher.hpp`, RAII, lambda callbacks, C++17 |
 | **Zig bindings** | **DONE** | `build.zig` + wrapper module, 6 tests pass |
-| Windows ReadDirChanges | ~80% | Restructured, callback pattern filtering added, 64-handle limit remains |
+| **Phase 7: Win32** | **DONE** | IOCP migration, UTF-8 Wide API, overflow detection, coalescing, error codes, UNC paths, 9 tests + 4 stress tests |
 | **Phase 5: kqueue** | **DONE** | O_EVTONLY, EV_CLEAR, dir rescan diffing, coalescing, pattern filtering, fd limit checks, 10 tests |
 | **Phase 6: FSEvents** | **DONE** | FSEventStreamCreate, CFRunLoop thread, file-level events, multi-flag emission, file target support, coalescing, 10 tests |
-| Tests | ~65% | 69 tests total: pattern(15) + platform(15) + poll(7) + inotify(10) + stress(4) + kqueue(10) + fsevents(10) + error(6) + backend_select(5) + zig(6), valgrind clean |
+| Tests | ~75% | 82 tests total: pattern(15) + platform(15) + poll(7) + inotify(10) + stress_inotify(4) + kqueue(10) + fsevents(10) + error(6) + backend_select(5) + zig(6) + win32(9) + stress_win32(4), valgrind clean |
 | Build system | ~85% | CMake + Zig build, per-platform selection, C++ example, macOS frameworks, test targets |
 | Documentation | ~20% | README exists, no API docs |

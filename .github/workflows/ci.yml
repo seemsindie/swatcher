@@ -56,6 +56,15 @@ jobs:
         if: runner.os == 'Linux'
         run: ./build/stress_inotify
 
+      # --- Windows-only tests ---
+      - name: Test (win32)
+        if: runner.os == 'Windows'
+        run: build\Debug\test_win32.exe
+
+      - name: Test (stress_win32)
+        if: runner.os == 'Windows'
+        run: build\Debug\stress_win32.exe
+
       # --- macOS-only tests ---
       - name: Test (kqueue)
         if: runner.os == 'macOS'
