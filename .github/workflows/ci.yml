@@ -1,0 +1,188 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Tests ─────────────────────────────────────────────────────────
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+    runs-on: ${{ matrix.os }}
+    name: Test (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build --config Debug
+
+      # --- Cross-platform tests ---
+      - name: Test (pattern)
+        run: ${{ runner.os == 'Windows' && 'build\\Debug\\test_pattern.exe' || './build/test_pattern' }}
+
+      - name: Test (platform)
+        run: ${{ runner.os == 'Windows' && 'build\\Debug\\test_platform.exe' || './build/test_platform' }}
+
+      - name: Test (poll)
+        run: ${{ runner.os == 'Windows' && 'build\\Debug\\test_poll.exe' || './build/test_poll' }}
+
+      - name: Test (error)
+        run: ${{ runner.os == 'Windows' && 'build\\Debug\\test_error.exe' || './build/test_error' }}
+
+      - name: Test (backend_select)
+        run: ${{ runner.os == 'Windows' && 'build\\Debug\\test_backend_select.exe' || './build/test_backend_select' }}
+
+      # --- Linux-only tests ---
+      - name: Test (inotify)
+        if: runner.os == 'Linux'
+        run: ./build/test_inotify
+
+      - name: Test (stress_inotify)
+        if: runner.os == 'Linux'
+        run: ./build/stress_inotify
+
+      # --- macOS-only tests ---
+      - name: Test (kqueue)
+        if: runner.os == 'macOS'
+        run: ./build/test_kqueue
+
+      - name: Test (fsevents)
+        if: runner.os == 'macOS'
+        run: ./build/test_fsevents
+
+      # --- Valgrind (Linux) ---
+      - name: Install valgrind
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Valgrind (error)
+        if: runner.os == 'Linux'
+        run: valgrind --leak-check=full --error-exitcode=1 ./build/test_error
+
+      - name: Valgrind (backend_select)
+        if: runner.os == 'Linux'
+        run: valgrind --leak-check=full --error-exitcode=1 ./build/test_backend_select
+
+      - name: Valgrind (poll)
+        if: runner.os == 'Linux'
+        run: valgrind --leak-check=full --error-exitcode=1 ./build/test_poll
+
+      - name: Valgrind (inotify)
+        if: runner.os == 'Linux'
+        run: valgrind --leak-check=full --error-exitcode=1 ./build/test_inotify
+
+  # ── Zig build + tests (Linux only) ───────────────────────────────
+  test-zig:
+    runs-on: ubuntu-latest
+    name: Test (Zig)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: master
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test-zig
+
+  # ── Release artifacts ─────────────────────────────────────────────
+  release:
+    needs: [test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x86_64
+            lib: libswatcher.a
+            ext: tar.gz
+          - os: macos-latest
+            artifact: macos-arm64
+            lib: libswatcher.a
+            ext: tar.gz
+          - os: windows-latest
+            artifact: windows-x86_64
+            lib: Release/swatcher.lib
+            ext: zip
+    runs-on: ${{ matrix.os }}
+    name: Release (${{ matrix.artifact }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (Release)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (Release)
+        run: cmake --build build --config Release
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          DIR=swatcher-${VERSION}-${{ matrix.artifact }}
+          mkdir -p ${DIR}/lib ${DIR}/include
+          cp build/${{ matrix.lib }} ${DIR}/lib/
+          cp include/swatcher.h include/swatcher_types.h include/uthash.h ${DIR}/include/
+          cp include/swatcher.hpp ${DIR}/include/
+          tar czf ${DIR}.tar.gz ${DIR}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $VERSION = $env:GITHUB_REF_NAME
+          $DIR = "swatcher-${VERSION}-${{ matrix.artifact }}"
+          New-Item -ItemType Directory -Path "${DIR}/lib","${DIR}/include" -Force
+          Copy-Item "build/${{ matrix.lib }}" "${DIR}/lib/swatcher.lib"
+          Copy-Item "include/swatcher.h","include/swatcher_types.h","include/uthash.h" "${DIR}/include/"
+          Copy-Item "include/swatcher.hpp" "${DIR}/include/"
+          Compress-Archive -Path "${DIR}" -DestinationPath "${DIR}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: swatcher-${{ matrix.artifact }}
+          path: swatcher-*.${{ matrix.ext }}
+
+  # ── Create GitHub Release ─────────────────────────────────────────
+  publish:
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ${GITHUB_REF_NAME} \
+            --title "swatcher ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            artifacts/*

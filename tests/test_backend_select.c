@@ -4,8 +4,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <direct.h>
+#define mkdir(d, m) _mkdir(d)
+#define rmdir _rmdir
+#else
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #include "swatcher.h"
 
