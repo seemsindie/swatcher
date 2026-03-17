@@ -1,6 +1,7 @@
 #include "swatcher.h"
 #include "../internal/internal.h"
 #include "../core/pattern.h"
+#include "../core/error.h"
 
 /* ========== Local types ========== */
 
@@ -332,12 +333,14 @@ static bool poll_add_target(swatcher *sw, swatcher_target *target)
     swatcher_poll *p = POLL_DATA(sw);
 
     if (sw_find_target_internal(sw, target->path)) {
+        sw_set_error(SWATCHER_ERR_TARGET_EXISTS);
         SWATCHER_LOG_DEFAULT_WARNING("Path already watched: %s", target->path);
         return false;
     }
 
     swatcher_target_poll *tp = malloc(sizeof(swatcher_target_poll));
     if (!tp) {
+        sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_target_poll");
         return false;
     }

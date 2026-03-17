@@ -56,6 +56,14 @@ SWATCHER_API bool swatcher_remove(swatcher *sw, swatcher_target *target);
 SWATCHER_API const char *swatcher_event_name(swatcher_fs_event event);
 SWATCHER_API bool swatcher_is_watched(swatcher *sw, const char *path);
 
+/* ---------- Error reporting ---------- */
+SWATCHER_API swatcher_error  swatcher_last_error(void);
+SWATCHER_API const char     *swatcher_error_string(swatcher_error err);
+
+/* ---------- Backend selection ---------- */
+SWATCHER_API bool         swatcher_init_with_backend(swatcher *sw, swatcher_config *config, const char *backend_name);
+SWATCHER_API const char **swatcher_backends_available(void);
+
 /* ---------- Logging ---------- */
 void swatcher_log(swatcher *sw, swatcher_log_level level, const char *file, int line, const char *format, ...);
 void swatcher_log_default(swatcher_log_level level, const char *file, int line, const char *format, ...);

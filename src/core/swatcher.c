@@ -1,31 +1,48 @@
 #include "swatcher.h"
 #include "../internal/internal.h"
+#include "error.h"
 
-SWATCHER_API bool swatcher_init(swatcher *sw, swatcher_config *config)
+SWATCHER_API bool swatcher_init_with_backend(swatcher *sw, swatcher_config *config, const char *backend_name)
 {
     if (!sw) {
+        sw_set_error(SWATCHER_ERR_NULL_ARG);
         SWATCHER_LOG_DEFAULT_ERROR("swatcher is NULL");
         return false;
     }
     if (!config) {
+        sw_set_error(SWATCHER_ERR_NULL_ARG);
         SWATCHER_LOG_DEFAULT_ERROR("config is NULL");
         return false;
     }
 
     swatcher_internal *si = malloc(sizeof(swatcher_internal));
     if (!si) {
+        sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_internal");
         return false;
     }
 
     si->mutex = sw_mutex_create();
     if (!si->mutex) {
+        sw_set_error(SWATCHER_ERR_MUTEX);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to create mutex");
         free(si);
         return false;
     }
 
-    si->backend = swatcher_backend_default();
+    if (backend_name) {
+        si->backend = sw_backend_find(backend_name);
+        if (!si->backend) {
+            sw_set_error(SWATCHER_ERR_BACKEND_NOT_FOUND);
+            SWATCHER_LOG_DEFAULT_ERROR("Backend not found: %s", backend_name);
+            sw_mutex_destroy(si->mutex);
+            free(si);
+            return false;
+        }
+    } else {
+        si->backend = swatcher_backend_default();
+    }
+
     si->backend_data = NULL;
     si->thread = NULL;
     si->targets = NULL;
@@ -35,6 +52,7 @@ SWATCHER_API bool swatcher_init(swatcher *sw, swatcher_config *config)
     sw->config = config;
 
     if (!si->backend->init(sw)) {
+        sw_set_error(SWATCHER_ERR_BACKEND_INIT);
         SWATCHER_LOG_DEFAULT_ERROR("Backend init failed");
         sw_mutex_destroy(si->mutex);
         free(si);
@@ -45,9 +63,15 @@ SWATCHER_API bool swatcher_init(swatcher *sw, swatcher_config *config)
     return true;
 }
 
+SWATCHER_API bool swatcher_init(swatcher *sw, swatcher_config *config)
+{
+    return swatcher_init_with_backend(sw, config, NULL);
+}
+
 SWATCHER_API bool swatcher_start(swatcher *sw)
 {
     if (!sw || !sw->_internal) {
+        sw_set_error(SWATCHER_ERR_NOT_INITIALIZED);
         SWATCHER_LOG_DEFAULT_ERROR("swatcher not initialized");
         return false;
     }
@@ -57,6 +81,7 @@ SWATCHER_API bool swatcher_start(swatcher *sw)
     sw_atomic_store(&sw->running, true);
     si->thread = sw_thread_create(si->backend->thread_func, sw);
     if (!si->thread) {
+        sw_set_error(SWATCHER_ERR_THREAD);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to create watcher thread");
         sw_atomic_store(&sw->running, false);
         return false;
@@ -81,6 +106,15 @@ SWATCHER_API void swatcher_stop(swatcher *sw)
 
 SWATCHER_API bool swatcher_add(swatcher *sw, swatcher_target *target)
 {
+    if (!sw || !sw->_internal) {
+        sw_set_error(SWATCHER_ERR_NOT_INITIALIZED);
+        return false;
+    }
+    if (!target) {
+        sw_set_error(SWATCHER_ERR_NULL_ARG);
+        return false;
+    }
+
     swatcher_internal *si = SW_INTERNAL(sw);
     bool result = false;
 
@@ -89,6 +123,7 @@ SWATCHER_API bool swatcher_add(swatcher *sw, swatcher_target *target)
     /* Internal struct (with compiled patterns) is created in swatcher_target_create() */
     swatcher_target_internal *ti = SW_TARGET_INTERNAL(target);
     if (!ti) {
+        sw_set_error(SWATCHER_ERR_NULL_ARG);
         SWATCHER_LOG_DEFAULT_ERROR("Target has no internal struct");
         sw_mutex_unlock(si->mutex);
         return false;
@@ -151,5 +186,9 @@ SWATCHER_API void swatcher_cleanup(swatcher *sw)
     sw_mutex_destroy(si->mutex);
     free(si);
     sw->_internal = NULL;
-    free(sw);
+}
+
+SWATCHER_API const char **swatcher_backends_available(void)
+{
+    return sw_backend_list();
 }

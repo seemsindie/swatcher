@@ -333,9 +333,4 @@ const swatcher_backend *swatcher_backend_win32(void)
     return &win32_backend;
 }
 
-const swatcher_backend *swatcher_backend_default(void)
-{
-    return swatcher_backend_win32();
-}
-
 #endif /* _WIN32 */

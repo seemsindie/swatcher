@@ -15,6 +15,7 @@ set(CORE_SOURCES
     src/core/event.c
     src/core/target.c
     src/core/pattern.c
+    src/core/error.c
     src/regex/re.c
 )
 
@@ -25,8 +26,11 @@ else()
     set(PLATFORM_SOURCES src/platform/platform_posix.c)
 endif()
 
-# Backend sources (poll fallback is always compiled)
-set(BACKEND_SOURCES src/backend/backend_poll.c)
+# Backend sources (poll fallback + registry are always compiled)
+set(BACKEND_SOURCES
+    src/backend/backend_poll.c
+    src/backend/backend_registry.c
+)
 if(WIN32)
     list(APPEND BACKEND_SOURCES src/backend/backend_win32.c)
 elseif(APPLE)
@@ -122,6 +126,30 @@ if(APPLE)
     target_link_libraries(test_fsevents swatcher)
 endif()
 
+# Error reporting tests
+add_executable(test_error tests/test_error.c)
+target_link_libraries(test_error swatcher)
+
+# Backend selection tests
+add_executable(test_backend_select tests/test_backend_select.c)
+target_link_libraries(test_backend_select swatcher)
+
+# C++ example (if C++ compiler available)
+include(CheckLanguage)
+check_language(CXX)
+if(CMAKE_CXX_COMPILER)
+    enable_language(CXX)
+    add_executable(swatcher_cpp_example examples/swatcher_cpp.cpp)
+    target_link_libraries(swatcher_cpp_example swatcher)
+    set_target_properties(swatcher_cpp_example PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+    )
+endif()
+
+# Install headers
+install(FILES include/swatcher.h include/swatcher_types.h include/swatcher.hpp
+        DESTINATION include)
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
 include(CPack)

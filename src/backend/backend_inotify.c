@@ -2,6 +2,7 @@
 
 #include "swatcher.h"
 #include "../internal/internal.h"
+#include "../core/error.h"
 
 #include <sys/inotify.h>
 #include <unistd.h>
@@ -98,6 +99,7 @@ static bool inotify_add_single(swatcher *sw, swatcher_target *target)
     swatcher_inotify *ino = INOTIFY_DATA(sw);
 
     if (sw_find_target_internal(sw, target->path)) {
+        sw_set_error(SWATCHER_ERR_TARGET_EXISTS);
         SWATCHER_LOG_DEFAULT_WARNING("Path already watched: %s", target->path);
         return false;
     }
@@ -112,6 +114,7 @@ static bool inotify_add_single(swatcher *sw, swatcher_target *target)
 
     swatcher_target_inotify *ino_target = malloc(sizeof(swatcher_target_inotify));
     if (!ino_target) {
+        sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_target_inotify");
         return false;
     }
@@ -120,11 +123,13 @@ static bool inotify_add_single(swatcher *sw, swatcher_target *target)
     ino_target->wd = inotify_add_watch(ino->inotify_fd, target->path, events_to_inotify_mask(target));
     if (ino_target->wd < 0) {
         if (errno == ENOSPC) {
+            sw_set_error(SWATCHER_ERR_WATCH_LIMIT);
             SWATCHER_LOG_DEFAULT_ERROR(
                 "inotify watch limit reached (%d/%d). "
                 "Increase via: sysctl fs.inotify.max_user_watches=524288",
                 ino->watch_count, ino->max_watches);
         } else {
+            sw_set_error(SWATCHER_ERR_BACKEND_INIT);
             SWATCHER_LOG_DEFAULT_ERROR("Failed to add watch for %s: %s",
                                         target->path, strerror(errno));
         }
@@ -820,11 +825,6 @@ static const swatcher_backend inotify_backend = {
 const swatcher_backend *swatcher_backend_inotify(void)
 {
     return &inotify_backend;
-}
-
-const swatcher_backend *swatcher_backend_default(void)
-{
-    return swatcher_backend_inotify();
 }
 
 #endif /* __linux__ */

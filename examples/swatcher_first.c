@@ -60,6 +60,7 @@ int main(void)
 
     SWATCHER_LOG_DEFAULT_INFO("Cleaning up swatcher...");
     swatcher_cleanup(global_watcher);
+    free(global_watcher);
 
     return EXIT_SUCCESS;
 }

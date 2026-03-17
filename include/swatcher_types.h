@@ -6,7 +6,12 @@
 #include <time.h>
 
 /* Atomic bool — used for cross-thread flags like sw->running */
-#if defined(_MSC_VER)
+#if defined(SWATCHER_ZIG_COMPAT)
+  /* Zig's translate-c cannot handle _Atomic — use plain volatile */
+  typedef volatile int sw_atomic_bool;
+  #define sw_atomic_load(p)       (*(p) != 0)
+  #define sw_atomic_store(p, v)   (*(p) = (int)(v))
+#elif defined(_MSC_VER)
   #include <intrin.h>
   typedef volatile long sw_atomic_bool;
   #define sw_atomic_load(p)       (_InterlockedOr((p), 0) != 0)
@@ -69,6 +74,24 @@ typedef enum swatcher_log_level {
     SW_LOG_INFO,
     SW_LOG_DEBUG
 } swatcher_log_level;
+
+typedef enum swatcher_error {
+    SWATCHER_OK = 0,
+    SWATCHER_ERR_NULL_ARG,
+    SWATCHER_ERR_ALLOC,
+    SWATCHER_ERR_INVALID_PATH,
+    SWATCHER_ERR_PATH_NOT_FOUND,
+    SWATCHER_ERR_BACKEND_INIT,
+    SWATCHER_ERR_BACKEND_NOT_FOUND,
+    SWATCHER_ERR_THREAD,
+    SWATCHER_ERR_MUTEX,
+    SWATCHER_ERR_NOT_INITIALIZED,
+    SWATCHER_ERR_TARGET_EXISTS,
+    SWATCHER_ERR_TARGET_NOT_FOUND,
+    SWATCHER_ERR_PATTERN_COMPILE,
+    SWATCHER_ERR_WATCH_LIMIT,
+    SWATCHER_ERR_UNKNOWN
+} swatcher_error;
 
 typedef struct swatcher_target swatcher_target;
 

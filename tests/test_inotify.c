@@ -191,6 +191,7 @@ static void test_inotify_detect_create(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
 
     remove(filepath);
     remove_test_dir();
@@ -233,6 +234,7 @@ static void test_inotify_detect_modify(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
 
     remove(filepath);
     remove_test_dir();
@@ -276,6 +278,7 @@ static void test_inotify_detect_delete(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
     remove_test_dir();
 }
 
@@ -319,6 +322,7 @@ static void test_inotify_detect_move(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
 
     remove(filepath_new);
     remove_test_dir();
@@ -370,6 +374,7 @@ static void test_inotify_recursive_dynamic_mkdir(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
 
     remove(filepath);
     remove_test_dir();
@@ -420,6 +425,7 @@ static void test_inotify_recursive_dynamic_rmdir(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
     remove_test_dir();
 }
 
@@ -465,6 +471,7 @@ static void test_inotify_pattern_filtering(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
 
     remove(txt_path);
     remove(log_path);
@@ -524,6 +531,7 @@ static void test_inotify_coalesce(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
 
     remove(filepath);
     remove_test_dir();

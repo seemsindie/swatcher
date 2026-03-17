@@ -183,6 +183,7 @@ static void test_poll_detect_file_create(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
 
     remove(filepath);
     remove_test_dir();
@@ -231,6 +232,7 @@ static void test_poll_detect_file_modify(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
 
     remove(filepath);
     remove_test_dir();
@@ -278,6 +280,7 @@ static void test_poll_detect_file_delete(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
     remove_test_dir();
 }
 
@@ -325,6 +328,7 @@ static void test_poll_detect_file_move(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
 
     remove(filepath_new);
     remove_test_dir();

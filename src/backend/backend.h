@@ -22,4 +22,8 @@ const swatcher_backend *swatcher_backend_kqueue(void);
 const swatcher_backend *swatcher_backend_poll(void);
 const swatcher_backend *swatcher_backend_default(void);
 
+/* Backend registry */
+const swatcher_backend *sw_backend_find(const char *name);
+const char **sw_backend_list(void);
+
 #endif /* SWATCHER_BACKEND_H */

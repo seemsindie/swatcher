@@ -1,0 +1,12 @@
+.{
+    .fingerprint = 0x681e70c89edcd38d,
+    .name = .swatcher,
+    .version = "0.1.0",
+    .paths = .{
+        "include",
+        "src",
+        "bindings",
+        "build.zig",
+        "build.zig.zon",
+    },
+}

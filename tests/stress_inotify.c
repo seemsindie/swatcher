@@ -166,6 +166,7 @@ static void stress_rapid_create(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
     remove_stress_dir();
 }
 
@@ -215,6 +216,7 @@ static void stress_rapid_modify(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
     remove_stress_dir();
 }
 
@@ -271,6 +273,7 @@ static void stress_deep_nesting(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
     remove_stress_dir();
 }
 
@@ -319,6 +322,7 @@ static void stress_churn(void)
 
     swatcher_stop(sw);
     swatcher_cleanup(sw);
+    free(sw);
     remove_stress_dir();
 }
 

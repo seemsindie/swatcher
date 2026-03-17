@@ -278,46 +278,20 @@
 ## Phase 8: Core — Event System & Lifecycle
 > Robust event dispatch, error handling, and resource management.
 
-- [ ] **8.1** Event dispatch pipeline:
-  ```
-  Backend raw event
-    → Event translation (platform → swatcher_fs_event)
-    → Pattern filtering (ignore_patterns → watch_patterns → callback_patterns)
-    → Event coalescing (optional, configurable)
-    → User callback invocation
-  ```
-- [ ] **8.2** Error reporting:
-  ```c
-  typedef enum {
-      SWATCHER_OK = 0,
-      SWATCHER_ERR_NOMEM,
-      SWATCHER_ERR_INVALID_PATH,
-      SWATCHER_ERR_PERMISSION,
-      SWATCHER_ERR_LIMIT_EXCEEDED,
-      SWATCHER_ERR_BACKEND_INIT,
-      SWATCHER_ERR_OVERFLOW,
-      // ...
-  } swatcher_error;
+- [x] **8.1** Event dispatch pipeline (done in Phase 4: pattern filtering, coalescing, callback invocation)
+- [x] **8.2** Error reporting: `swatcher_error` enum, thread-local `swatcher_last_error()`, `swatcher_error_string()`, instrumented in core + backends
+- [x] **8.3** Backend selection: `swatcher_init_with_backend()` by name, `swatcher_backends_available()`, backend registry
+- [x] **8.4** Thread-safe add/remove while running (mutex-protected, done in Phase 4)
+- [x] **8.5** Graceful shutdown: `swatcher_cleanup()` no longer frees caller-owned `sw` (RAII-safe), drain + join + free all internal resources
+- [x] **8.6** Zero-leak guarantee: all tests valgrind clean
+- [x] **8.7** Event deduplication / coalescing (done in Phase 4: configurable `coalesce_ms`)
 
-  swatcher_error swatcher_last_error(swatcher *sw);
-  const char *swatcher_error_string(swatcher_error err);
-  ```
-- [ ] **8.3** Backend selection & fallback:
-  ```c
-  // Auto-select best backend for platform
-  swatcher_init(sw, config);
+### Language Bindings
 
-  // Force specific backend
-  swatcher_init_with_backend(sw, config, SWATCHER_BACKEND_KQUEUE);
-
-  // Auto with fallback chain: inotify → poll (Linux)
-  //                           fsevents → kqueue → poll (macOS)
-  //                           win32 → poll (Windows)
-  ```
-- [ ] **8.4** Thread-safe add/remove while running
-- [ ] **8.5** Graceful shutdown: drain pending events, join threads, free all resources
-- [ ] **8.6** Zero-leak guarantee: run all tests under Valgrind / AddressSanitizer
-- [ ] **8.7** Event deduplication: configurable window to merge rapid events on same path
+- [x] **C++ wrapper** (`include/swatcher.hpp`): header-only, C++17, `sw::Watcher` + `sw::Target` RAII classes, lambda callbacks, move semantics
+- [x] **Zig bindings** (`bindings/zig/swatcher.zig`): idiomatic wrapper with allocator support, error mapping, `build.zig` integration
+- C++ example: `examples/swatcher_cpp.cpp`
+- Zig tests: `bindings/zig/test_swatcher.zig` (6 tests)
 
 ---
 
@@ -463,9 +437,12 @@ Phase 12 (Platforms)     ████        ← future expansion
 | **Phase 2: PAL** | **DONE** | Threads, mutex, paths, dirs, stat (mtime/size), monotonic time, atomics, sleep. No #ifdef outside platform/. 15 platform tests, valgrind clean |
 | **Phase 3: Poll fallback** | **DONE** | backend_poll.c: create/modify/delete/move detection, configurable interval, uthash snapshots, benchmarked (100K files in 326ms) |
 | **Phase 4: inotify** | **DONE** | Mutex fix, dynamic recursive, limit checking, coalescing, overflow handling, 10 tests + 4 stress tests, valgrind clean |
+| **Phase 8: Core** | **DONE** | Error reporting, backend selection, ownership fix, all valgrind clean |
+| **C++ bindings** | **DONE** | Header-only `swatcher.hpp`, RAII, lambda callbacks, C++17 |
+| **Zig bindings** | **DONE** | `build.zig` + wrapper module, 6 tests pass |
 | Windows ReadDirChanges | ~80% | Restructured, callback pattern filtering added, 64-handle limit remains |
 | **Phase 5: kqueue** | **DONE** | O_EVTONLY, EV_CLEAR, dir rescan diffing, coalescing, pattern filtering, fd limit checks, 10 tests |
 | **Phase 6: FSEvents** | **DONE** | FSEventStreamCreate, CFRunLoop thread, file-level events, multi-flag emission, file target support, coalescing, 10 tests |
-| Tests | ~50% | test_pattern (15) + test_platform (15) + test_poll (7) + test_inotify (10) + stress_inotify (4) + bench_poll, all valgrind clean |
-| Build system | ~70% | CMake works, per-platform source selection, test targets |
+| Tests | ~65% | 69 tests total: pattern(15) + platform(15) + poll(7) + inotify(10) + stress(4) + kqueue(10) + fsevents(10) + error(6) + backend_select(5) + zig(6), valgrind clean |
+| Build system | ~85% | CMake + Zig build, per-platform selection, C++ example, macOS frameworks, test targets |
 | Documentation | ~20% | README exists, no API docs |

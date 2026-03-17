@@ -1,16 +1,25 @@
 #include "swatcher.h"
 #include "../internal/internal.h"
+#include "error.h"
 
 SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
 {
+    if (!desc) {
+        sw_set_error(SWATCHER_ERR_NULL_ARG);
+        SWATCHER_LOG_DEFAULT_ERROR("desc is NULL");
+        return NULL;
+    }
+
     swatcher_target *target = malloc(sizeof(swatcher_target));
     if (!target) {
+        sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_target");
         return NULL;
     }
 
     char normalized_path[SW_PATH_MAX];
     if (!sw_path_normalize(desc->path, normalized_path, SW_PATH_MAX, desc->follow_symlinks)) {
+        sw_set_error(SWATCHER_ERR_INVALID_PATH);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to normalize path: %s", desc->path);
         free(target);
         return NULL;
@@ -18,6 +27,7 @@ SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
 
     sw_file_info info;
     if (!sw_stat(normalized_path, &info, desc->follow_symlinks)) {
+        sw_set_error(SWATCHER_ERR_PATH_NOT_FOUND);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to stat path: %s", normalized_path);
         free(target);
         return NULL;
@@ -29,6 +39,7 @@ SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
 
     target->path = sw_strdup(normalized_path);
     if (!target->path) {
+        sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate path (string)");
         free(target);
         return NULL;
@@ -55,6 +66,7 @@ SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
     /* Create internal struct early so compiled patterns are available
      * before backends start recursive directory traversal. */
     if (!sw_target_internal_create(target)) {
+        sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to create target internal for %s", target->path);
         free(target->path);
         free(target);
