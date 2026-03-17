@@ -249,6 +249,13 @@ if (!sw) {
 
 Error codes: `SWATCHER_OK`, `SWATCHER_ERR_NULL_ARG`, `SWATCHER_ERR_ALLOC`, `SWATCHER_ERR_INVALID_PATH`, `SWATCHER_ERR_PATH_NOT_FOUND`, `SWATCHER_ERR_BACKEND_INIT`, `SWATCHER_ERR_BACKEND_NOT_FOUND`, `SWATCHER_ERR_THREAD`, `SWATCHER_ERR_MUTEX`, `SWATCHER_ERR_NOT_INITIALIZED`, `SWATCHER_ERR_TARGET_EXISTS`, `SWATCHER_ERR_TARGET_NOT_FOUND`, `SWATCHER_ERR_PATTERN_COMPILE`, `SWATCHER_ERR_WATCH_LIMIT`, `SWATCHER_ERR_UNKNOWN`.
 
+## Acknowledgments
+
+swatcher vendors the following libraries:
+
+- [uthash](https://troydhanson.github.io/uthash/) by Troy D. Hanson — BSD 1-Clause license
+- [tiny-regex-c](https://github.com/kokke/tiny-regex-c) by kokke — public domain
+
 ## License
 
 BSD-2-Clause
