@@ -211,42 +211,45 @@
 ## Phase 5: Backend — kqueue (macOS / BSD)
 > Native backend for macOS and FreeBSD/OpenBSD/NetBSD.
 
-- [ ] **5.1** Implement `backend_kqueue.c`:
+- [x] **5.1** Implement `backend_kqueue.c`:
   - `kqueue()` + `kevent()` based file monitoring
   - `EVFILT_VNODE` with `NOTE_WRITE | NOTE_DELETE | NOTE_RENAME | NOTE_ATTRIB | NOTE_EXTEND`
   - Open file descriptors for each watched path
-- [ ] **5.2** Recursive watching:
+- [x] **5.2** Recursive watching:
   - Monitor directories for `NOTE_WRITE` (indicates child added/removed)
   - Re-scan on directory change, add/remove watches for new/deleted entries
-- [ ] **5.3** Handle fd limits:
+- [x] **5.3** Handle fd limits:
   - Check `getrlimit(RLIMIT_NOFILE)`
-  - Fall back to poll for directories exceeding limit
+  - Warn at 90%, fail gracefully near limit
   - Log warnings
-- [ ] **5.4** Symlink handling:
-  - `O_SYMLINK` flag for watching symlinks themselves
-  - `O_NOFOLLOW` for not following
-- [ ] **5.5** Write kqueue backend tests
-- [ ] **5.6** Test on macOS and at least one BSD (FreeBSD)
+- [x] **5.4** Symlink handling:
+  - `O_SYMLINK` flag for watching symlinks themselves (macOS)
+  - `O_NOFOLLOW` for not following (BSD)
+- [x] **5.5** Write kqueue backend tests — 10 tests (backend exists, create/modify/delete/move, dynamic mkdir/rmdir, patterns, coalesce, fd limit)
+- [ ] **5.6** Test on at least one BSD (FreeBSD)
 
 ---
 
 ## Phase 6: Backend — FSEvents (macOS)
 > High-level macOS backend, better for large directory trees.
 
-- [ ] **6.1** Rewrite `swatcher_macos.h` into `backend_fsevents.c`:
+- [x] **6.1** Rewrite stub into `backend_fsevents.c`:
   - `FSEventStreamCreate` with proper flags
   - `kFSEventStreamCreateFlagFileEvents` for file-level events
   - `kFSEventStreamCreateFlagNoDefer` for immediate delivery
-- [ ] **6.2** Run loop management:
+- [x] **6.2** Run loop management:
   - Dedicated thread with `CFRunLoop`
   - Proper start/stop/invalidate lifecycle
-- [ ] **6.3** Event translation:
+- [x] **6.3** Event translation:
   - Map `kFSEventStreamEventFlagItem*` to `swatcher_fs_event`
-  - Handle coalesced events (FSEvents batches by design)
+  - Multi-event emission for compound FSEvents flags (e.g., Created|Modified)
+  - File target support (watches parent dir, filters to exact path)
+  - Watch option filtering (files/dirs/symlinks via ItemIs* flags)
+  - Pattern filtering, coalescing, overflow handling
 - [ ] **6.4** Historical events support (optional):
   - `kFSEventStreamEventIdSinceNow` vs specific event ID
   - Could be useful for "catch up" after reconnect
-- [ ] **6.5** Write FSEvents backend tests
+- [x] **6.5** Write FSEvents backend tests — 10 tests (backend exists, create/modify/delete/move, recursive mkdir/rmdir, patterns, coalesce, file target)
 - [ ] **6.6** Benchmark vs kqueue for large trees (>10K files)
 
 ---
@@ -461,9 +464,8 @@ Phase 12 (Platforms)     ████        ← future expansion
 | **Phase 3: Poll fallback** | **DONE** | backend_poll.c: create/modify/delete/move detection, configurable interval, uthash snapshots, benchmarked (100K files in 326ms) |
 | **Phase 4: inotify** | **DONE** | Mutex fix, dynamic recursive, limit checking, coalescing, overflow handling, 10 tests + 4 stress tests, valgrind clean |
 | Windows ReadDirChanges | ~80% | Restructured, callback pattern filtering added, 64-handle limit remains |
-| macOS FSEvents | ~10% | Skeleton only |
-| macOS kqueue | 0% | Not started |
-| Poll fallback | 0% | Not started |
+| **Phase 5: kqueue** | **DONE** | O_EVTONLY, EV_CLEAR, dir rescan diffing, coalescing, pattern filtering, fd limit checks, 10 tests |
+| **Phase 6: FSEvents** | **DONE** | FSEventStreamCreate, CFRunLoop thread, file-level events, multi-flag emission, file target support, coalescing, 10 tests |
 | Tests | ~50% | test_pattern (15) + test_platform (15) + test_poll (7) + test_inotify (10) + stress_inotify (4) + bench_poll, all valgrind clean |
 | Build system | ~70% | CMake works, per-platform source selection, test targets |
 | Documentation | ~20% | README exists, no API docs |

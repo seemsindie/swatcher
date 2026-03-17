@@ -70,6 +70,11 @@ if(NOT WIN32)
     target_link_libraries(swatcher PRIVATE Threads::Threads)
 endif()
 
+# Link CoreServices on macOS (FSEvents)
+if(APPLE)
+    target_link_libraries(swatcher PRIVATE "-framework CoreServices")
+endif()
+
 # Example
 add_executable(swatcher_first examples/swatcher_first.c)
 target_link_libraries(swatcher_first swatcher)
@@ -112,6 +117,9 @@ endif()
 if(APPLE)
     add_executable(test_kqueue tests/test_kqueue.c)
     target_link_libraries(test_kqueue swatcher)
+
+    add_executable(test_fsevents tests/test_fsevents.c)
+    target_link_libraries(test_fsevents swatcher)
 endif()
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
