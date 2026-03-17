@@ -96,9 +96,10 @@ static char *wide_to_utf8(const WCHAR *wide, int wchar_count)
     if (!wide) return NULL;
     int len = WideCharToMultiByte(CP_UTF8, 0, wide, wchar_count, NULL, 0, NULL, NULL);
     if (len <= 0) return NULL;
-    char *utf8 = malloc(len);
+    char *utf8 = malloc(len + 1); /* +1 to guarantee null terminator */
     if (!utf8) return NULL;
     WideCharToMultiByte(CP_UTF8, 0, wide, wchar_count, utf8, len, NULL, NULL);
+    utf8[len] = '\0'; /* WideCharToMultiByte with positive count doesn't null-terminate */
     return utf8;
 }
 

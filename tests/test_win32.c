@@ -185,7 +185,7 @@ static void test_win32_detect_create(void)
     snprintf(filepath, sizeof(filepath), "%s%ccreated.txt", test_dir_abs, sw_path_separator());
     write_file(filepath, "hello");
 
-    sw_sleep_ms(800);
+    sw_sleep_ms(500);
 
     assert(get_event_count() > 0);
     assert(has_event(SWATCHER_EVENT_CREATED, "created.txt"));
@@ -230,7 +230,7 @@ static void test_win32_detect_modify(void)
     reset_events();
 
     write_file(filepath, "modified content");
-    sw_sleep_ms(800);
+    sw_sleep_ms(500);
 
     assert(get_event_count() > 0);
     assert(has_event(SWATCHER_EVENT_MODIFIED, "modify.txt"));
@@ -276,7 +276,7 @@ static void test_win32_detect_delete(void)
 
     sw_sleep_ms(300);
     remove(filepath);
-    sw_sleep_ms(800);
+    sw_sleep_ms(500);
 
     assert(get_event_count() > 0);
     assert(has_event(SWATCHER_EVENT_DELETED, "delete.txt"));
@@ -322,7 +322,7 @@ static void test_win32_detect_move(void)
 
     sw_sleep_ms(300);
     rename(filepath_old, filepath_new);
-    sw_sleep_ms(800);
+    sw_sleep_ms(500);
 
     assert(get_event_count() > 0);
     assert(has_event(SWATCHER_EVENT_MOVED, NULL));
@@ -371,7 +371,7 @@ static void test_win32_recursive(void)
              test_dir_abs, sw_path_separator(), sw_path_separator());
     write_file(filepath, "nested content");
 
-    sw_sleep_ms(800);
+    sw_sleep_ms(500);
 
     assert(get_event_count() > 0);
     assert(has_event(SWATCHER_EVENT_CREATED, "nested.txt"));
