@@ -3,6 +3,7 @@
 Cross-platform file system watching library in pure C.
 
 [![CI](https://github.com/seemsindie/swatcher/actions/workflows/ci.yml/badge.svg)](https://github.com/seemsindie/swatcher/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-BSD_2--Clause-blue.svg)](https://opensource.org/licenses/BSD-2-Clause)
 
 ## Features
 
@@ -181,12 +182,26 @@ w.start();
 ### Zig
 
 ```zig
-const swatcher = @import("swatcher");
-var watcher = try swatcher.Watcher.init(.{ .poll_interval_ms = 100 });
+const sw = @import("swatcher");
+
+var watcher = try sw.Watcher.init(allocator, .{
+    .poll_interval_ms = 100,
+    .enable_logging = true,
+    .coalesce_ms = 0,
+}, null);
 defer watcher.deinit();
+
+try watcher.addTarget(.{
+    .path = "./src",
+    .events = sw.Event.all,
+    .recursive = true,
+    .callback = onEvent,
+});
+
+try watcher.start();
 ```
 
-See `bindings/zig/` for the full wrapper and build integration.
+See `examples/swatcher_zig.zig` for a full working example and `bindings/zig/` for the wrapper module.
 
 ## Configuration
 
@@ -236,4 +251,4 @@ Error codes: `SWATCHER_OK`, `SWATCHER_ERR_NULL_ARG`, `SWATCHER_ERR_ALLOC`, `SWAT
 
 ## License
 
-MIT
+BSD-2-Clause

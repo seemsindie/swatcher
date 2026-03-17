@@ -74,4 +74,25 @@ pub fn build(b: *std.Build) void {
     const run_zig_test = b.addRunArtifact(zig_test);
     const test_step = b.step("test-zig", "Run Zig wrapper integration tests");
     test_step.dependOn(&run_zig_test.step);
+
+    // ── Zig example ───────────────────────────────────────────────
+
+    const zig_example = b.addExecutable(.{
+        .name = "swatcher_zig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/swatcher_zig.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "swatcher", .module = swatcher_mod },
+            },
+        }),
+    });
+    zig_example.root_module.linkLibrary(lib);
+
+    b.installArtifact(zig_example);
+
+    const run_example = b.addRunArtifact(zig_example);
+    const run_step = b.step("run-example", "Run the Zig example");
+    run_step.dependOn(&run_example.step);
 }

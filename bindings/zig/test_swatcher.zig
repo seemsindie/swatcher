@@ -57,7 +57,7 @@ test "backends available includes poll" {
 
 var test_event_count: u32 = 0;
 
-fn testCallback(_: sw.FsEvent, _: *sw.RawTarget, _: ?[*:0]const u8, _: ?*anyopaque) void {
+fn testCallback(_: sw.FsEvent, _: *sw.RawTarget, _: ?[*:0]const u8, _: ?*anyopaque) callconv(.c) void {
     test_event_count += 1;
 }
 

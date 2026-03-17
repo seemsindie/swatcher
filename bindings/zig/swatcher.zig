@@ -75,7 +75,7 @@ pub fn backendsAvailable() [*]const [*:0]const u8 {
 }
 
 /// Callback function type for Zig.
-pub const CallbackFn = *const fn (event: FsEvent, target: *RawTarget, name: ?[*:0]const u8, data: ?*anyopaque) void;
+pub const CallbackFn = *const fn (event: FsEvent, target: *RawTarget, name: ?[*:0]const u8, data: ?*anyopaque) callconv(.c) void;
 
 pub const TargetOpts = struct {
     path: [*:0]const u8,
