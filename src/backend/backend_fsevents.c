@@ -64,7 +64,7 @@ const swatcher_backend *swatcher_backend_fsevents(void)
 
 const swatcher_backend *swatcher_backend_default(void)
 {
-    return swatcher_backend_fsevents();
+    return swatcher_backend_kqueue();
 }
 
 #endif /* __APPLE__ */
