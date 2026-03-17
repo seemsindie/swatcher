@@ -139,8 +139,10 @@ SWATCHER_API void swatcher_cleanup(swatcher *sw)
     HASH_ITER(hh_global, si->targets, current, tmp) {
         si->backend->remove_target(sw, current->target);
         HASH_DELETE(hh_global, si->targets, current);
-        free(current->target->path);
-        free(current->target);
+        swatcher_target *t = current->target;
+        current->target = NULL; /* prevent use-after-free in destroy */
+        free(t->path);
+        free(t);
         sw_target_internal_destroy(current);
     }
 

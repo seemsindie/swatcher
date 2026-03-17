@@ -25,13 +25,14 @@ else()
     set(PLATFORM_SOURCES src/platform/platform_posix.c)
 endif()
 
-# Backend sources
+# Backend sources (poll fallback is always compiled)
+set(BACKEND_SOURCES src/backend/backend_poll.c)
 if(WIN32)
-    set(BACKEND_SOURCES src/backend/backend_win32.c)
+    list(APPEND BACKEND_SOURCES src/backend/backend_win32.c)
 elseif(APPLE)
-    set(BACKEND_SOURCES src/backend/backend_fsevents.c)
+    list(APPEND BACKEND_SOURCES src/backend/backend_fsevents.c)
 else()
-    set(BACKEND_SOURCES src/backend/backend_inotify.c)
+    list(APPEND BACKEND_SOURCES src/backend/backend_inotify.c)
 endif()
 
 add_library(swatcher
@@ -88,6 +89,23 @@ target_include_directories(test_platform PRIVATE include src)
 if(NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(test_platform PRIVATE Threads::Threads)
+endif()
+
+# Poll backend tests (links full library)
+add_executable(test_poll tests/test_poll.c)
+target_link_libraries(test_poll swatcher)
+
+# Poll backend benchmark
+add_executable(bench_poll tests/bench_poll.c)
+target_link_libraries(bench_poll swatcher)
+
+# inotify backend tests (Linux only)
+if(NOT WIN32 AND NOT APPLE)
+    add_executable(test_inotify tests/test_inotify.c)
+    target_link_libraries(test_inotify swatcher)
+
+    add_executable(stress_inotify tests/stress_inotify.c)
+    target_link_libraries(stress_inotify swatcher)
 endif()
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})

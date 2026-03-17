@@ -42,6 +42,8 @@ typedef struct sw_file_info {
     bool is_file;
     bool is_directory;
     bool is_symlink;
+    uint64_t size;       /* file size in bytes */
+    uint64_t mtime;      /* modification time (seconds since epoch) */
 } sw_file_info;
 
 bool sw_stat(const char *path, sw_file_info *info, bool follow_symlinks);
@@ -60,6 +62,9 @@ void sw_dir_close(sw_dir *d);
 
 /* Monotonic time (milliseconds) */
 uint64_t sw_time_now_ms(void);
+
+/* Sleep (milliseconds) */
+void sw_sleep_ms(int ms);
 
 /* String */
 char *sw_strdup(const char *s);

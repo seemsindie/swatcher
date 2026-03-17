@@ -18,6 +18,7 @@ typedef struct swatcher_backend {
 const swatcher_backend *swatcher_backend_inotify(void);
 const swatcher_backend *swatcher_backend_fsevents(void);
 const swatcher_backend *swatcher_backend_win32(void);
+const swatcher_backend *swatcher_backend_poll(void);
 const swatcher_backend *swatcher_backend_default(void);
 
 #endif /* SWATCHER_BACKEND_H */

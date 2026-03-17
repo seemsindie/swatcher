@@ -142,6 +142,22 @@ bool sw_stat(const char *path, sw_file_info *info, bool follow_symlinks)
     info->is_directory = (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
     info->is_file = !info->is_directory;
     info->is_symlink = (attr & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) {
+        ULARGE_INTEGER li;
+        li.LowPart = fad.nFileSizeLow;
+        li.HighPart = fad.nFileSizeHigh;
+        info->size = (uint64_t)li.QuadPart;
+        /* Convert FILETIME to seconds since Unix epoch */
+        ULARGE_INTEGER ft;
+        ft.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+        ft.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+        info->mtime = (uint64_t)((ft.QuadPart - 116444736000000000ULL) / 10000000ULL);
+    } else {
+        info->size = 0;
+        info->mtime = 0;
+    }
     return true;
 }
 
@@ -199,6 +215,13 @@ void sw_dir_close(sw_dir *d)
 uint64_t sw_time_now_ms(void)
 {
     return (uint64_t)GetTickCount64();
+}
+
+/* ========== Sleep ========== */
+
+void sw_sleep_ms(int ms)
+{
+    Sleep((DWORD)ms);
 }
 
 /* ========== String ========== */

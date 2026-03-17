@@ -50,7 +50,10 @@ typedef enum swatcher_fs_event {
     SWATCHER_EVENT_ACCESSED      = 1 << 6,
     SWATCHER_EVENT_ATTRIB_CHANGE = 1 << 7,
 
-    SWATCHER_EVENT_ALL           = 0xFF
+    SWATCHER_EVENT_ALL           = 0xFF,
+
+    /* Meta-event: always delivered regardless of event mask */
+    SWATCHER_EVENT_OVERFLOW      = 1 << 8
 } swatcher_fs_event;
 
 typedef enum swatcher_watch_option {
@@ -110,6 +113,7 @@ typedef struct swatcher_target_desc {
 typedef struct swatcher_config {
     int poll_interval_ms;
     bool enable_logging;
+    int coalesce_ms;      /* event coalescing window (0 = disabled) */
 } swatcher_config;
 
 typedef struct swatcher {
