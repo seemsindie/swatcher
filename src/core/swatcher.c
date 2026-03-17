@@ -188,6 +188,33 @@ SWATCHER_API void swatcher_cleanup(swatcher *sw)
     sw->_internal = NULL;
 }
 
+SWATCHER_API swatcher *swatcher_create(swatcher_config *config)
+{
+    return swatcher_create_with_backend(config, NULL);
+}
+
+SWATCHER_API swatcher *swatcher_create_with_backend(swatcher_config *config, const char *backend_name)
+{
+    swatcher *sw = malloc(sizeof(swatcher));
+    if (!sw) {
+        sw_set_error(SWATCHER_ERR_ALLOC);
+        return NULL;
+    }
+    if (!swatcher_init_with_backend(sw, config, backend_name)) {
+        free(sw);
+        return NULL;
+    }
+    return sw;
+}
+
+SWATCHER_API void swatcher_destroy(swatcher *sw)
+{
+    if (!sw) return;
+    swatcher_stop(sw);
+    swatcher_cleanup(sw);
+    free(sw);
+}
+
 SWATCHER_API const char **swatcher_backends_available(void)
 {
     return sw_backend_list();

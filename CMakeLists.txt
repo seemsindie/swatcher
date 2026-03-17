@@ -79,9 +79,12 @@ if(APPLE)
     target_link_libraries(swatcher PRIVATE "-framework CoreServices")
 endif()
 
-# Example
+# Examples
 add_executable(swatcher_first examples/swatcher_first.c)
 target_link_libraries(swatcher_first swatcher)
+
+add_executable(live_reload examples/live_reload.c)
+target_link_libraries(live_reload swatcher)
 
 # Pattern tests
 add_executable(test_pattern tests/test_pattern.c src/core/pattern.c src/regex/re.c src/core/log.c)

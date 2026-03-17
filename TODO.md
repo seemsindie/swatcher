@@ -329,34 +329,12 @@
 ## Phase 10: API Polish & Documentation
 > Make it a joy to use.
 
-- [ ] **10.1** Simplify the public API:
-  ```c
-  // Simple one-shot setup
-  swatcher *sw = swatcher_create(&(swatcher_config){ .poll_interval_ms = 100 });
-  swatcher_watch(sw, "/path", SWATCHER_EVENT_ALL, my_callback, NULL);
-  swatcher_start(sw);
-  // ...
-  swatcher_destroy(sw); // stops + cleans up everything
-  ```
-- [ ] **10.2** Builder-pattern for targets:
-  ```c
-  swatcher_target *t = swatcher_target_builder()
-      .path("/some/path")
-      .recursive(true)
-      .events(SWATCHER_EVENT_CREATED | SWATCHER_EVENT_MODIFIED)
-      .ignore("*.tmp", "*.swp", ".git")  // glob patterns
-      .callback(my_cb)
-      .build();
-  ```
-  (Or just keep the designated initializer approach — it's already clean in C99+)
-- [ ] **10.3** Header documentation (Doxygen-style comments on all public functions)
-- [ ] **10.4** Usage examples:
-  - `basic.c` — minimal watch + callback
-  - `recursive.c` — recursive directory watching with patterns
-  - `multi_backend.c` — explicit backend selection
-  - `live_reload.c` — practical example: rebuild on source change
-- [ ] **10.5** README rewrite with architecture diagram, quick start, API reference
-- [ ] **10.6** Man page or single-page HTML docs
+- [x] **10.1** Convenience API: `swatcher_create()` / `swatcher_create_with_backend()` / `swatcher_destroy()` — handles alloc/free internally
+- ~~**10.2**~~ **Skipped**: Builder pattern — designated initializers are already clean in C99+
+- [x] **10.3** Header documentation (Doxygen-style comments on all public functions and types)
+- [x] **10.4** Usage examples: `swatcher_first.c` updated to use convenience API, `live_reload.c` added (watch src/ for .c/.h changes)
+- [x] **10.5** README rewrite with architecture diagram, quick start, full API reference, backend/config/error docs
+- ~~**10.6**~~ **Skipped**: Man page — README is sufficient at this stage
 
 ---
 
@@ -440,4 +418,5 @@ Phase 12 (Platforms)     ████        ← future expansion
 | **Phase 6: FSEvents** | **DONE** | FSEventStreamCreate, CFRunLoop thread, file-level events, multi-flag emission, file target support, coalescing, 10 tests |
 | Tests | ~75% | 82 tests total: pattern(15) + platform(15) + poll(7) + inotify(10) + stress_inotify(4) + kqueue(10) + fsevents(10) + error(6) + backend_select(5) + zig(6) + win32(9) + stress_win32(4), valgrind clean |
 | Build system | ~85% | CMake + Zig build, per-platform selection, C++ example, macOS frameworks, test targets |
-| Documentation | ~20% | README exists, no API docs |
+| **Phase 10: API Polish** | **DONE** | Convenience API, Doxygen headers, README rewrite, live_reload example |
+| Documentation | ~90% | README, Doxygen comments, examples |

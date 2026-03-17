@@ -44,30 +44,33 @@
 extern "C" {
 #endif
 
+/** @brief File system event types (bitmask). */
 typedef enum swatcher_fs_event {
     SWATCHER_EVENT_NONE          = 0,
-    SWATCHER_EVENT_CREATED       = 1 << 0,
-    SWATCHER_EVENT_MODIFIED      = 1 << 1,
-    SWATCHER_EVENT_DELETED       = 1 << 2,
-    SWATCHER_EVENT_MOVED         = 1 << 3,
-    SWATCHER_EVENT_OPENED        = 1 << 4,
-    SWATCHER_EVENT_CLOSED        = 1 << 5,
-    SWATCHER_EVENT_ACCESSED      = 1 << 6,
-    SWATCHER_EVENT_ATTRIB_CHANGE = 1 << 7,
+    SWATCHER_EVENT_CREATED       = 1 << 0,  /**< File or directory created. */
+    SWATCHER_EVENT_MODIFIED      = 1 << 1,  /**< File contents changed. */
+    SWATCHER_EVENT_DELETED       = 1 << 2,  /**< File or directory deleted. */
+    SWATCHER_EVENT_MOVED         = 1 << 3,  /**< File or directory renamed/moved. */
+    SWATCHER_EVENT_OPENED        = 1 << 4,  /**< File opened (inotify only). */
+    SWATCHER_EVENT_CLOSED        = 1 << 5,  /**< File closed (inotify only). */
+    SWATCHER_EVENT_ACCESSED      = 1 << 6,  /**< File accessed (inotify only). */
+    SWATCHER_EVENT_ATTRIB_CHANGE = 1 << 7,  /**< File attributes changed. */
 
-    SWATCHER_EVENT_ALL           = 0xFF,
+    SWATCHER_EVENT_ALL           = 0xFF,     /**< All event types. */
 
-    /* Meta-event: always delivered regardless of event mask */
+    /** @brief Meta-event: kernel event queue overflowed. Always delivered. */
     SWATCHER_EVENT_OVERFLOW      = 1 << 8
 } swatcher_fs_event;
 
+/** @brief Filter which filesystem entry types to watch (bitmask). */
 typedef enum swatcher_watch_option {
-    SWATCHER_WATCH_ALL         = 0,
-    SWATCHER_WATCH_FILES       = 1 << 0,
-    SWATCHER_WATCH_DIRECTORIES = 1 << 1,
-    SWATCHER_WATCH_SYMLINKS    = 1 << 2
+    SWATCHER_WATCH_ALL         = 0,        /**< Watch files, directories, and symlinks. */
+    SWATCHER_WATCH_FILES       = 1 << 0,   /**< Watch files only. */
+    SWATCHER_WATCH_DIRECTORIES = 1 << 1,   /**< Watch directories only. */
+    SWATCHER_WATCH_SYMLINKS    = 1 << 2    /**< Watch symlinks only. */
 } swatcher_watch_option;
 
+/** @brief Log severity levels. */
 typedef enum swatcher_log_level {
     SW_LOG_ERROR,
     SW_LOG_WARNING,
@@ -75,29 +78,38 @@ typedef enum swatcher_log_level {
     SW_LOG_DEBUG
 } swatcher_log_level;
 
+/** @brief Error codes returned by swatcher_last_error(). */
 typedef enum swatcher_error {
-    SWATCHER_OK = 0,
-    SWATCHER_ERR_NULL_ARG,
-    SWATCHER_ERR_ALLOC,
-    SWATCHER_ERR_INVALID_PATH,
-    SWATCHER_ERR_PATH_NOT_FOUND,
-    SWATCHER_ERR_BACKEND_INIT,
-    SWATCHER_ERR_BACKEND_NOT_FOUND,
-    SWATCHER_ERR_THREAD,
-    SWATCHER_ERR_MUTEX,
-    SWATCHER_ERR_NOT_INITIALIZED,
-    SWATCHER_ERR_TARGET_EXISTS,
-    SWATCHER_ERR_TARGET_NOT_FOUND,
-    SWATCHER_ERR_PATTERN_COMPILE,
-    SWATCHER_ERR_WATCH_LIMIT,
-    SWATCHER_ERR_UNKNOWN
+    SWATCHER_OK = 0,                /**< No error. */
+    SWATCHER_ERR_NULL_ARG,          /**< A required argument was NULL. */
+    SWATCHER_ERR_ALLOC,             /**< Memory allocation failed. */
+    SWATCHER_ERR_INVALID_PATH,      /**< Path is invalid or empty. */
+    SWATCHER_ERR_PATH_NOT_FOUND,    /**< Path does not exist. */
+    SWATCHER_ERR_BACKEND_INIT,      /**< Backend initialization failed. */
+    SWATCHER_ERR_BACKEND_NOT_FOUND, /**< Named backend not available on this platform. */
+    SWATCHER_ERR_THREAD,            /**< Thread creation failed. */
+    SWATCHER_ERR_MUTEX,             /**< Mutex creation failed. */
+    SWATCHER_ERR_NOT_INITIALIZED,   /**< Watcher not initialized. */
+    SWATCHER_ERR_TARGET_EXISTS,     /**< Target path already watched. */
+    SWATCHER_ERR_TARGET_NOT_FOUND,  /**< Target not found. */
+    SWATCHER_ERR_PATTERN_COMPILE,   /**< Regex/glob pattern failed to compile. */
+    SWATCHER_ERR_WATCH_LIMIT,       /**< OS watch limit reached. */
+    SWATCHER_ERR_UNKNOWN            /**< Unknown error. */
 } swatcher_error;
 
 typedef struct swatcher_target swatcher_target;
 
+/**
+ * @brief Callback invoked when a file system event occurs.
+ * @param event          The event type (bitmask).
+ * @param target         The target that triggered the event.
+ * @param event_name     The file/directory name that changed (may be NULL).
+ * @param additional_data  User-provided data from swatcher_target_desc.user_data.
+ */
 typedef void (*swatcher_callback_fn)(swatcher_fs_event event, swatcher_target *target,
                                      const char *event_name, void *additional_data);
 
+/** @brief A watched target (file or directory). Created via swatcher_target_create(). */
 struct swatcher_target {
     char *path;
     char **callback_patterns;
@@ -119,26 +131,37 @@ struct swatcher_target {
     void *_internal;
 };
 
+/**
+ * @brief Descriptor for creating a watch target.
+ *
+ * Use with designated initializers and pass to swatcher_target_create().
+ */
 typedef struct swatcher_target_desc {
-    char *path;
-    bool is_recursive;
-    swatcher_fs_event events;
-    swatcher_watch_option watch_options;
-    char **callback_patterns;
-    char **watch_patterns;
-    char **ignore_patterns;
-    void *user_data;
-    bool follow_symlinks;
+    char *path;                          /**< Path to watch (file or directory). */
+    bool is_recursive;                   /**< Watch subdirectories recursively. */
+    swatcher_fs_event events;            /**< Event types to listen for. */
+    swatcher_watch_option watch_options; /**< Filter by entry type. */
+    char **callback_patterns;            /**< Glob/regex patterns — only matching names trigger callback. */
+    char **watch_patterns;               /**< Glob/regex patterns — only watch matching entries. */
+    char **ignore_patterns;              /**< Glob/regex patterns — skip matching entries. */
+    void *user_data;                     /**< Passed to callback as additional_data. */
+    bool follow_symlinks;                /**< Follow symlinks to their targets. */
 
-    swatcher_callback_fn callback;
+    swatcher_callback_fn callback;       /**< Event callback function. */
 } swatcher_target_desc;
 
+/**
+ * @brief Watcher configuration.
+ *
+ * Zero-initialize for defaults, or set fields as needed.
+ */
 typedef struct swatcher_config {
-    int poll_interval_ms;
-    bool enable_logging;
-    int coalesce_ms;      /* event coalescing window (0 = disabled) */
+    int poll_interval_ms;  /**< Poll interval in milliseconds (poll backend). */
+    bool enable_logging;   /**< Enable internal logging to stderr. */
+    int coalesce_ms;       /**< Event coalescing window in ms (0 = disabled). */
 } swatcher_config;
 
+/** @brief Opaque watcher handle. */
 typedef struct swatcher {
     sw_atomic_bool running;
     swatcher_config *config;
