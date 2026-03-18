@@ -416,7 +416,18 @@ Phase 12 (Platforms)     ████        ← future expansion
 | **Phase 7: Win32** | **DONE** | IOCP migration, UTF-8 Wide API, overflow detection, coalescing, error codes, UNC paths, 9 tests + 4 stress tests |
 | **Phase 5: kqueue** | **DONE** | O_EVTONLY, EV_CLEAR, dir rescan diffing, coalescing, pattern filtering, fd limit checks, 10 tests |
 | **Phase 6: FSEvents** | **DONE** | FSEventStreamCreate, CFRunLoop thread, file-level events, multi-flag emission, file target support, coalescing, 10 tests |
-| Tests | ~75% | 82 tests total: pattern(15) + platform(15) + poll(7) + inotify(10) + stress_inotify(4) + kqueue(10) + fsevents(10) + error(6) + backend_select(5) + zig(6) + win32(9) + stress_win32(4), valgrind clean |
-| Build system | ~85% | CMake + Zig build, per-platform selection, C++ example, macOS frameworks, test targets |
+| Tests | ~85% | 86+ tests total: pattern(15) + platform(15) + poll(7) + inotify(10) + stress_inotify(4) + kqueue(10) + fsevents(10) + error(6) + backend_select(5) + allocator(4) + zig(6) + win32(9) + stress_win32(4), valgrind clean |
+| Build system | ~95% | CMake + Zig build, per-platform selection, C++ example, macOS frameworks, FreeBSD CI, test targets |
 | **Phase 10: API Polish** | **DONE** | Convenience API, Doxygen headers, README rewrite, live_reload example |
+| **Phase 11: Core Improvements** | **DONE** | Custom allocators, move pairing (old_path), file type info (is_dir), remote FS detection, overflow recovery, VCS-aware pause, incremental poll scan, memory pool |
+| **Phase 11: New Backends** | **DONE** | fanotify (Linux 5.1+), io_uring (Linux 5.6+) — 8 backends total |
+| **Phase 11: BSD Support** | **DONE** | CMake detection, backend registry, FreeBSD CI job |
 | Documentation | ~90% | README, Doxygen comments, examples |
+
+---
+
+## Future Work
+
+- Single-header amalgamation distribution
+- Package manager integration (vcpkg, Conan, pkg-config, CMake find_package)
+- Lock-free SPSC ring buffer for event dispatch (Phase J.3)

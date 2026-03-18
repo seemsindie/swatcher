@@ -1,6 +1,7 @@
 #if defined(_WIN32) || defined(_WIN64)
 
 #include "platform.h"
+#include "../internal/alloc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,7 @@ static WCHAR *utf8_to_wide(const char *utf8)
     if (!utf8) return NULL;
     int len = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
     if (len <= 0) return NULL;
-    WCHAR *wide = malloc(len * sizeof(WCHAR));
+    WCHAR *wide = sw_malloc(len * sizeof(WCHAR));
     if (!wide) return NULL;
     MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, len);
     return wide;
@@ -26,7 +27,7 @@ static char *wide_to_utf8_alloc(const WCHAR *wide)
     if (!wide) return NULL;
     int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
     if (len <= 0) return NULL;
-    char *utf8 = malloc(len);
+    char *utf8 = sw_malloc(len);
     if (!utf8) return NULL;
     WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, len, NULL, NULL);
     return utf8;
@@ -40,7 +41,7 @@ struct sw_mutex {
 
 sw_mutex *sw_mutex_create(void)
 {
-    sw_mutex *m = malloc(sizeof(sw_mutex));
+    sw_mutex *m = sw_malloc(sizeof(sw_mutex));
     if (!m) return NULL;
     InitializeCriticalSection(&m->cs);
     return m;
@@ -50,7 +51,7 @@ void sw_mutex_destroy(sw_mutex *m)
 {
     if (!m) return;
     DeleteCriticalSection(&m->cs);
-    free(m);
+    sw_free(m);
 }
 
 void sw_mutex_lock(sw_mutex *m)
@@ -75,7 +76,7 @@ static DWORD WINAPI sw_thread_trampoline(LPVOID param)
     sw_thread_trampoline_data *data = (sw_thread_trampoline_data *)param;
     sw_thread_func func = data->func;
     void *arg = data->arg;
-    free(data);
+    sw_free(data);
     func(arg);
     return 0;
 }
@@ -86,12 +87,12 @@ struct sw_thread {
 
 sw_thread *sw_thread_create(sw_thread_func func, void *arg)
 {
-    sw_thread *t = malloc(sizeof(sw_thread));
+    sw_thread *t = sw_malloc(sizeof(sw_thread));
     if (!t) return NULL;
 
-    sw_thread_trampoline_data *data = malloc(sizeof(sw_thread_trampoline_data));
+    sw_thread_trampoline_data *data = sw_malloc(sizeof(sw_thread_trampoline_data));
     if (!data) {
-        free(t);
+        sw_free(t);
         return NULL;
     }
     data->func = func;
@@ -100,8 +101,8 @@ sw_thread *sw_thread_create(sw_thread_func func, void *arg)
     DWORD tid;
     t->handle = CreateThread(NULL, 0, sw_thread_trampoline, data, 0, &tid);
     if (t->handle == NULL) {
-        free(data);
-        free(t);
+        sw_free(data);
+        sw_free(t);
         return NULL;
     }
     return t;
@@ -116,7 +117,7 @@ void sw_thread_destroy(sw_thread *t)
 {
     if (!t) return;
     if (t->handle) CloseHandle(t->handle);
-    free(t);
+    sw_free(t);
 }
 
 /* ========== Path utilities ========== */
@@ -138,7 +139,7 @@ bool sw_path_normalize(const char *input, char *output, size_t size, bool resolv
             char *cwd = wide_to_utf8_alloc(cwd_wide);
             if (!cwd) return false;
             snprintf(output, size, "%s\\%s", cwd, input);
-            free(cwd);
+            sw_free(cwd);
             for (size_t i = 0; output[i] != '\0'; i++) {
                 if (output[i] == '/') output[i] = '\\';
             }
@@ -168,7 +169,7 @@ bool sw_stat(const char *path, sw_file_info *info, bool follow_symlinks)
 
     DWORD attr = GetFileAttributesW(wide_path);
     if (attr == INVALID_FILE_ATTRIBUTES) {
-        free(wide_path);
+        sw_free(wide_path);
         return false;
     }
 
@@ -212,17 +213,17 @@ sw_dir *sw_dir_open(const char *path)
     WCHAR *wide_pattern = utf8_to_wide(pattern);
     if (!wide_pattern) return NULL;
 
-    sw_dir *d = malloc(sizeof(sw_dir));
+    sw_dir *d = sw_malloc(sizeof(sw_dir));
     if (!d) {
-        free(wide_pattern);
+        sw_free(wide_pattern);
         return NULL;
     }
 
     d->handle = FindFirstFileW(wide_pattern, &d->ffd);
-    free(wide_pattern);
+    sw_free(wide_pattern);
 
     if (d->handle == INVALID_HANDLE_VALUE) {
-        free(d);
+        sw_free(d);
         return NULL;
     }
     d->first = true;
@@ -243,7 +244,7 @@ bool sw_dir_next(sw_dir *d, sw_dir_entry *entry)
     if (!utf8_name) return false;
     strncpy(entry->name, utf8_name, sizeof(entry->name) - 1);
     entry->name[sizeof(entry->name) - 1] = '\0';
-    free(utf8_name);
+    sw_free(utf8_name);
 
     entry->is_dir = (d->ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     entry->is_file = !entry->is_dir;
@@ -255,7 +256,7 @@ void sw_dir_close(sw_dir *d)
 {
     if (!d) return;
     FindClose(d->handle);
-    free(d);
+    sw_free(d);
 }
 
 /* ========== Monotonic time ========== */
@@ -276,7 +277,35 @@ void sw_sleep_ms(int ms)
 
 char *sw_strdup(const char *s)
 {
-    return _strdup(s);
+    if (!s) return NULL;
+    size_t len = strlen(s) + 1;
+    char *d = sw_malloc(len);
+    if (d) memcpy(d, s, len);
+    return d;
+}
+
+/* ========== Remote filesystem detection ========== */
+
+bool sw_filesystem_is_remote(const char *path)
+{
+    if (!path) return false;
+    /* Extract drive root (e.g., "C:\") or use UNC path */
+    char root[4] = {0};
+    if (path[0] == '\\' && path[1] == '\\')
+        return true; /* UNC paths are always remote */
+    if (isalpha(path[0]) && path[1] == ':') {
+        root[0] = path[0];
+        root[1] = ':';
+        root[2] = '\\';
+        root[3] = '\0';
+    } else {
+        return false;
+    }
+    WCHAR *wide_root = utf8_to_wide(root);
+    if (!wide_root) return false;
+    UINT type = GetDriveTypeW(wide_root);
+    sw_free(wide_root);
+    return type == DRIVE_REMOTE;
 }
 
 #endif /* _WIN32 */

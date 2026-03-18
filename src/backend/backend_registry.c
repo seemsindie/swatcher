@@ -8,8 +8,10 @@ typedef struct {
 } backend_entry;
 
 static const backend_entry backends[] = {
-#if defined(__linux__) || defined(__unix__)
-    { "inotify",  swatcher_backend_inotify },
+#if defined(__linux__)
+    { "inotify",   swatcher_backend_inotify },
+    { "fanotify",  swatcher_backend_fanotify },
+    { "io_uring",  swatcher_backend_uring },
 #endif
 #if defined(__APPLE__)
     { "kqueue",   swatcher_backend_kqueue },
@@ -31,7 +33,7 @@ const swatcher_backend *sw_backend_find(const char *name)
     return NULL;
 }
 
-static const char *backend_names[8];
+static const char *backend_names[16];
 
 const char **sw_backend_list(void)
 {

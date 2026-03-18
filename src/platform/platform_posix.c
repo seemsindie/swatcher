@@ -1,6 +1,7 @@
 #if defined(__linux__) || defined(__unix__) || defined(__unix) || defined(unix) || defined(__APPLE__)
 
 #include "platform.h"
+#include "../internal/alloc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,12 @@
 #include <limits.h>
 #include <stdio.h>
 
+#if defined(__linux__)
+#include <sys/statfs.h>
+#else
+#include <sys/mount.h>
+#endif
+
 /* ========== Mutex ========== */
 
 struct sw_mutex {
@@ -19,10 +26,10 @@ struct sw_mutex {
 
 sw_mutex *sw_mutex_create(void)
 {
-    sw_mutex *m = malloc(sizeof(sw_mutex));
+    sw_mutex *m = sw_malloc(sizeof(sw_mutex));
     if (!m) return NULL;
     if (pthread_mutex_init(&m->mtx, NULL) != 0) {
-        free(m);
+        sw_free(m);
         return NULL;
     }
     return m;
@@ -32,7 +39,7 @@ void sw_mutex_destroy(sw_mutex *m)
 {
     if (!m) return;
     pthread_mutex_destroy(&m->mtx);
-    free(m);
+    sw_free(m);
 }
 
 void sw_mutex_lock(sw_mutex *m)
@@ -53,10 +60,10 @@ struct sw_thread {
 
 sw_thread *sw_thread_create(sw_thread_func func, void *arg)
 {
-    sw_thread *t = malloc(sizeof(sw_thread));
+    sw_thread *t = sw_malloc(sizeof(sw_thread));
     if (!t) return NULL;
     if (pthread_create(&t->handle, NULL, func, arg) != 0) {
-        free(t);
+        sw_free(t);
         return NULL;
     }
     return t;
@@ -69,7 +76,7 @@ void sw_thread_join(sw_thread *t)
 
 void sw_thread_destroy(sw_thread *t)
 {
-    free(t);
+    sw_free(t);
 }
 
 /* ========== Path utilities ========== */
@@ -144,7 +151,7 @@ sw_dir *sw_dir_open(const char *path)
 {
     DIR *d = opendir(path);
     if (!d) return NULL;
-    sw_dir *dir = malloc(sizeof(sw_dir));
+    sw_dir *dir = sw_malloc(sizeof(sw_dir));
     if (!dir) {
         closedir(d);
         return NULL;
@@ -170,7 +177,7 @@ void sw_dir_close(sw_dir *d)
 {
     if (!d) return;
     closedir(d->handle);
-    free(d);
+    sw_free(d);
 }
 
 /* ========== Monotonic time ========== */
@@ -196,7 +203,52 @@ void sw_sleep_ms(int ms)
 
 char *sw_strdup(const char *s)
 {
-    return strdup(s);
+    if (!s) return NULL;
+    size_t len = strlen(s) + 1;
+    char *d = sw_malloc(len);
+    if (d) memcpy(d, s, len);
+    return d;
 }
+
+/* ========== Remote filesystem detection ========== */
+
+#if defined(__linux__)
+
+bool sw_filesystem_is_remote(const char *path)
+{
+    struct statfs buf;
+    if (statfs(path, &buf) != 0)
+        return false;
+    switch ((unsigned long)buf.f_type) {
+    case 0x6969:       /* NFS */
+    case 0xFF534D42:   /* CIFS */
+    case 0xFE534D42:   /* SMB2 */
+    case 0x65735546:   /* FUSE */
+    case 0x5346414F:   /* AFS */
+    case 0x564C:       /* NCP */
+    case 0x6F636673:   /* OCFS2 */
+    case 0x01021997:   /* 9P/WSL */
+        return true;
+    default:
+        return false;
+    }
+}
+
+#else /* macOS / BSD */
+
+bool sw_filesystem_is_remote(const char *path)
+{
+    struct statfs buf;
+    if (statfs(path, &buf) != 0)
+        return false;
+    const char *remote_types[] = { "nfs", "smbfs", "afpfs", "webdav", "cifs", NULL };
+    for (int i = 0; remote_types[i]; i++) {
+        if (strcmp(buf.f_fstypename, remote_types[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
+#endif /* linux vs macOS/BSD */
 
 #endif /* POSIX */

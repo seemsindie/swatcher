@@ -17,6 +17,10 @@ set(CORE_SOURCES
     src/core/pattern.c
     src/core/error.c
     src/regex/re.c
+    src/internal/alloc.c
+    src/internal/pool.c
+    src/core/rescan.c
+    src/core/vcs.c
 )
 
 # Platform sources
@@ -35,8 +39,10 @@ if(WIN32)
     list(APPEND BACKEND_SOURCES src/backend/backend_win32.c)
 elseif(APPLE)
     list(APPEND BACKEND_SOURCES src/backend/backend_fsevents.c src/backend/backend_kqueue.c)
+elseif(CMAKE_SYSTEM_NAME MATCHES "FreeBSD|OpenBSD|NetBSD|DragonFly")
+    list(APPEND BACKEND_SOURCES src/backend/backend_kqueue.c)
 else()
-    list(APPEND BACKEND_SOURCES src/backend/backend_inotify.c)
+    list(APPEND BACKEND_SOURCES src/backend/backend_inotify.c src/backend/backend_fanotify.c src/backend/backend_uring.c)
 endif()
 
 add_library(swatcher
@@ -87,7 +93,7 @@ add_executable(live_reload examples/live_reload.c)
 target_link_libraries(live_reload swatcher)
 
 # Pattern tests
-add_executable(test_pattern tests/test_pattern.c src/core/pattern.c src/regex/re.c src/core/log.c)
+add_executable(test_pattern tests/test_pattern.c src/core/pattern.c src/regex/re.c src/core/log.c src/internal/alloc.c)
 target_include_directories(test_pattern PRIVATE include src)
 
 # Platform tests
@@ -96,7 +102,7 @@ if(WIN32)
 else()
     set(TEST_PLATFORM_SOURCES src/platform/platform_posix.c)
 endif()
-add_executable(test_platform tests/test_platform.c ${TEST_PLATFORM_SOURCES})
+add_executable(test_platform tests/test_platform.c ${TEST_PLATFORM_SOURCES} src/internal/alloc.c)
 target_include_directories(test_platform PRIVATE include src)
 if(NOT WIN32)
     find_package(Threads REQUIRED)
@@ -120,11 +126,14 @@ if(NOT WIN32 AND NOT APPLE)
     target_link_libraries(stress_inotify swatcher)
 endif()
 
-# kqueue backend tests (macOS/BSD only)
-if(APPLE)
+# kqueue backend tests (macOS/BSD)
+if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD|OpenBSD|NetBSD|DragonFly")
     add_executable(test_kqueue tests/test_kqueue.c)
     target_link_libraries(test_kqueue swatcher)
+endif()
 
+# FSEvents backend tests (macOS only)
+if(APPLE)
     add_executable(test_fsevents tests/test_fsevents.c)
     target_link_libraries(test_fsevents swatcher)
 endif()
@@ -145,6 +154,10 @@ target_link_libraries(test_error swatcher)
 # Backend selection tests
 add_executable(test_backend_select tests/test_backend_select.c)
 target_link_libraries(test_backend_select swatcher)
+
+# Allocator tests
+add_executable(test_allocator tests/test_allocator.c)
+target_link_libraries(test_allocator swatcher)
 
 # C++ example (if C++ compiler available)
 include(CheckLanguage)

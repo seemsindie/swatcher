@@ -13,6 +13,7 @@
 
 /* Pattern matching via compiled patterns */
 #include "../core/pattern.h"
+#include "../core/vcs.h"
 
 /* ========== Local types ========== */
 
@@ -36,6 +37,8 @@ typedef struct coalesce_entry {
     swatcher_fs_event event;
     swatcher_target *target;
     uint64_t timestamp_ms;
+    bool is_dir;
+    char old_path[SW_PATH_MAX];
     UT_hash_handle hh;
 } coalesce_entry;
 
@@ -91,7 +94,7 @@ static dir_child_entry *snapshot_directory(const char *path)
         if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0)
             continue;
 
-        dir_child_entry *ce = malloc(sizeof(dir_child_entry));
+        dir_child_entry *ce = sw_malloc(sizeof(dir_child_entry));
         if (!ce) continue;
         strncpy(ce->name, entry.name, sizeof(ce->name) - 1);
         ce->name[sizeof(ce->name) - 1] = '\0';
@@ -107,7 +110,7 @@ static void free_children(dir_child_entry *children)
     dir_child_entry *current, *tmp;
     HASH_ITER(hh, children, current, tmp) {
         HASH_DEL(children, current);
-        free(current);
+        sw_free(current);
     }
 }
 
@@ -163,7 +166,7 @@ static bool kqueue_add_single(swatcher *sw, swatcher_target *target)
         return false;
     }
 
-    kqueue_watch *kw = malloc(sizeof(kqueue_watch));
+    kqueue_watch *kw = sw_malloc(sizeof(kqueue_watch));
     if (!kw) {
         close(fd);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate kqueue_watch");
@@ -183,7 +186,7 @@ static bool kqueue_add_single(swatcher *sw, swatcher_target *target)
 
     if (!kqueue_register_fd(kqd->kq, fd, kw)) {
         if (kw->children) free_children(kw->children);
-        free(kw);
+        sw_free(kw);
         close(fd);
         return false;
     }
@@ -201,7 +204,7 @@ static bool kqueue_add_single(swatcher *sw, swatcher_target *target)
             kqd->watch_count--;
             if (kw->children) free_children(kw->children);
             close(fd);
-            free(kw);
+            sw_free(kw);
             return false;
         }
     }
@@ -276,8 +279,8 @@ static bool kqueue_add_recursive_locked(swatcher *sw, swatcher_target *original_
 
                 if (!kqueue_add_recursive_locked(sw, new_target, skip_self)) {
                     SWATCHER_LOG_DEFAULT_WARNING("Failed to add watch for %s", new_target->path);
-                    free(new_target->path);
-                    free(new_target);
+                    sw_free(new_target->path);
+                    sw_free(new_target);
                     continue;
                 }
             } else if (entry.is_file) {
@@ -312,8 +315,8 @@ static bool kqueue_add_recursive_locked(swatcher *sw, swatcher_target *original_
 
                     if (!kqueue_add_single(sw, new_target)) {
                         SWATCHER_LOG_DEFAULT_WARNING("Failed to add watch (file) for %s", new_target->path);
-                        free(new_target->path);
-                        free(new_target);
+                        sw_free(new_target->path);
+                        sw_free(new_target);
                         continue;
                     }
                 }
@@ -349,26 +352,26 @@ static bool kqueue_add_recursive_locked(swatcher *sw, swatcher_target *original_
                         if (original_target->watch_options & SWATCHER_WATCH_FILES ||
                             original_target->watch_options == SWATCHER_WATCH_ALL) {
                             if (!kqueue_add_single(sw, new_target)) {
-                                free(new_target->path);
-                                free(new_target);
+                                sw_free(new_target->path);
+                                sw_free(new_target);
                                 continue;
                             }
                         } else {
-                            free(new_target->path);
-                            free(new_target);
+                            sw_free(new_target->path);
+                            sw_free(new_target);
                             continue;
                         }
                     } else {
                         if (original_target->watch_options & SWATCHER_WATCH_DIRECTORIES ||
                             original_target->watch_options == SWATCHER_WATCH_ALL) {
                             if (!kqueue_add_recursive_locked(sw, new_target, false)) {
-                                free(new_target->path);
-                                free(new_target);
+                                sw_free(new_target->path);
+                                sw_free(new_target);
                                 continue;
                             }
                         } else {
-                            free(new_target->path);
-                            free(new_target);
+                            sw_free(new_target->path);
+                            sw_free(new_target);
                             continue;
                         }
                     }
@@ -403,8 +406,8 @@ static bool kqueue_add_recursive_locked(swatcher *sw, swatcher_target *original_
                         }
 
                         if (!kqueue_add_single(sw, new_target)) {
-                            free(new_target->path);
-                            free(new_target);
+                            sw_free(new_target->path);
+                            sw_free(new_target);
                             continue;
                         }
                     }
@@ -445,11 +448,11 @@ static void kqueue_remove_children(swatcher *sw, const char *dir_path)
                 sw_target_internal_destroy(ti);
             }
             if (current->children) free_children(current->children);
-            free(current);
+            sw_free(current);
 
             if (t) {
-                free(t->path);
-                free(t);
+                sw_free(t->path);
+                sw_free(t);
             }
         }
     }
@@ -492,8 +495,8 @@ static void kqueue_handle_dynamic_mkdir(swatcher *sw, swatcher_target *parent, c
 
     if (!kqueue_add_recursive_locked(sw, new_target, false)) {
         SWATCHER_LOG_DEFAULT_WARNING("Failed to watch new dir: %s", new_path);
-        free(new_target->path);
-        free(new_target);
+        sw_free(new_target->path);
+        sw_free(new_target);
     }
 }
 
@@ -511,15 +514,15 @@ static void kqueue_handle_dynamic_rmdir(swatcher *sw, const char *dir_path)
             HASH_DEL(kqd->watches, kw);
             kqd->watch_count--;
             if (kw->children) free_children(kw->children);
-            free(kw);
+            sw_free(kw);
             ti->backend_data = NULL;
         }
         sw_remove_target_internal(sw, ti);
         swatcher_target *t = ti->target;
         ti->target = NULL;
         if (t) {
-            free(t->path);
-            free(t);
+            sw_free(t->path);
+            sw_free(t);
         }
         sw_target_internal_destroy(ti);
     }
@@ -529,11 +532,16 @@ static void kqueue_handle_dynamic_rmdir(swatcher *sw, const char *dir_path)
 
 static void kqueue_coalesce_dispatch(swatcher *sw, coalesce_entry *ce)
 {
-    (void)sw;
     if (ce->target && ce->target->callback) {
+        if (sw_vcs_should_pause(sw->config, ce->target->path))
+            return;
         const char *name = strrchr(ce->path, '/');
         name = name ? name + 1 : ce->path;
-        ce->target->callback(ce->event, ce->target, name, NULL);
+        swatcher_event_info info = {
+            .old_path = ce->old_path[0] ? ce->old_path : NULL,
+            .is_dir = ce->is_dir,
+        };
+        ce->target->callback(ce->event, ce->target, name, &info);
         ce->target->last_event_time = time(NULL);
     }
 }
@@ -547,13 +555,14 @@ static void kqueue_coalesce_flush(swatcher *sw, uint64_t now_ms, int coalesce_ms
         if (flush_all || (now_ms - current->timestamp_ms >= (uint64_t)coalesce_ms)) {
             kqueue_coalesce_dispatch(sw, current);
             HASH_DEL(kqd->pending_events, current);
-            free(current);
+            sw_free(current);
         }
     }
 }
 
 static void kqueue_coalesce_add(swatcher *sw, const char *full_path,
-                                 swatcher_fs_event event, swatcher_target *target)
+                                 swatcher_fs_event event, swatcher_target *target,
+                                 bool is_dir, const char *old_path)
 {
     swatcher_kqueue *kqd = KQUEUE_DATA(sw);
     coalesce_entry *existing = NULL;
@@ -563,7 +572,7 @@ static void kqueue_coalesce_add(swatcher *sw, const char *full_path,
     if (existing) {
         if (existing->event == SWATCHER_EVENT_CREATED && event == SWATCHER_EVENT_DELETED) {
             HASH_DEL(kqd->pending_events, existing);
-            free(existing);
+            sw_free(existing);
             return;
         } else if (existing->event == SWATCHER_EVENT_CREATED && event == SWATCHER_EVENT_MODIFIED) {
             existing->timestamp_ms = sw_time_now_ms();
@@ -577,14 +586,28 @@ static void kqueue_coalesce_add(swatcher *sw, const char *full_path,
             return;
         }
         existing->event = event;
+        existing->is_dir = is_dir;
+        if (old_path) {
+            strncpy(existing->old_path, old_path, SW_PATH_MAX - 1);
+            existing->old_path[SW_PATH_MAX - 1] = '\0';
+        } else {
+            existing->old_path[0] = '\0';
+        }
         existing->timestamp_ms = sw_time_now_ms();
     } else {
-        coalesce_entry *ce = malloc(sizeof(coalesce_entry));
+        coalesce_entry *ce = sw_malloc(sizeof(coalesce_entry));
         if (!ce) return;
         strncpy(ce->path, full_path, SW_PATH_MAX - 1);
         ce->path[SW_PATH_MAX - 1] = '\0';
         ce->event = event;
         ce->target = target;
+        ce->is_dir = is_dir;
+        if (old_path) {
+            strncpy(ce->old_path, old_path, SW_PATH_MAX - 1);
+            ce->old_path[SW_PATH_MAX - 1] = '\0';
+        } else {
+            ce->old_path[0] = '\0';
+        }
         ce->timestamp_ms = sw_time_now_ms();
         HASH_ADD_STR(kqd->pending_events, path, ce);
     }
@@ -593,7 +616,8 @@ static void kqueue_coalesce_add(swatcher *sw, const char *full_path,
 /* ========== Event dispatch ========== */
 
 static void kqueue_dispatch_event(swatcher *sw, swatcher_target *target,
-                                   swatcher_fs_event sw_event, const char *name)
+                                   swatcher_fs_event sw_event, const char *name,
+                                   bool is_dir, const char *old_path)
 {
     int coalesce_ms = sw->config->coalesce_ms;
 
@@ -605,10 +629,13 @@ static void kqueue_dispatch_event(swatcher *sw, swatcher_target *target,
         else
             snprintf(full_path, SW_PATH_MAX, "%s/%s", target->path, name);
 
-        kqueue_coalesce_add(sw, full_path, sw_event, target);
+        kqueue_coalesce_add(sw, full_path, sw_event, target, is_dir, old_path);
     } else {
         if (target->callback) {
-            target->callback(sw_event, target, name, NULL);
+            if (sw_vcs_should_pause(sw->config, target->path))
+                return;
+            swatcher_event_info info = { .old_path = old_path, .is_dir = is_dir };
+            target->callback(sw_event, target, name, &info);
             target->last_event_time = time(NULL);
         }
     }
@@ -638,7 +665,7 @@ static void kqueue_rescan_directory(swatcher *sw, kqueue_watch *kw)
             }
 
             if ((target->events & SWATCHER_EVENT_CREATED) || (target->events == SWATCHER_EVENT_ALL)) {
-                kqueue_dispatch_event(sw, target, SWATCHER_EVENT_CREATED, name);
+                kqueue_dispatch_event(sw, target, SWATCHER_EVENT_CREATED, name, nc->is_directory, NULL);
             }
 
 skip_created:
@@ -664,7 +691,7 @@ skip_created:
             }
 
             if ((target->events & SWATCHER_EVENT_DELETED) || (target->events == SWATCHER_EVENT_ALL)) {
-                kqueue_dispatch_event(sw, target, SWATCHER_EVENT_DELETED, name);
+                kqueue_dispatch_event(sw, target, SWATCHER_EVENT_DELETED, name, oc->is_directory, NULL);
             }
 
 skip_deleted:
@@ -690,7 +717,7 @@ skip_deleted:
 
 static bool kqueue_init_backend(swatcher *sw)
 {
-    swatcher_kqueue *kqd = malloc(sizeof(swatcher_kqueue));
+    swatcher_kqueue *kqd = sw_malloc(sizeof(swatcher_kqueue));
     if (!kqd) {
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_kqueue");
         return false;
@@ -699,7 +726,7 @@ static bool kqueue_init_backend(swatcher *sw)
     kqd->kq = kqueue();
     if (kqd->kq < 0) {
         SWATCHER_LOG_DEFAULT_ERROR("Failed to create kqueue: %s", strerror(errno));
-        free(kqd);
+        sw_free(kqd);
         return false;
     }
 
@@ -721,7 +748,7 @@ static void kqueue_destroy(swatcher *sw)
     coalesce_entry *ce, *ce_tmp;
     HASH_ITER(hh, kqd->pending_events, ce, ce_tmp) {
         HASH_DEL(kqd->pending_events, ce);
-        free(ce);
+        sw_free(ce);
     }
 
     /* Close all watch fds and free watches */
@@ -730,11 +757,11 @@ static void kqueue_destroy(swatcher *sw)
         close(kw->fd);
         HASH_DEL(kqd->watches, kw);
         if (kw->children) free_children(kw->children);
-        free(kw);
+        sw_free(kw);
     }
 
     close(kqd->kq);
-    free(kqd);
+    sw_free(kqd);
     SW_INTERNAL(sw)->backend_data = NULL;
 }
 
@@ -755,7 +782,7 @@ static bool kqueue_remove_target(swatcher *sw, swatcher_target *target)
         HASH_DEL(kqd->watches, kw);
         kqd->watch_count--;
         if (kw->children) free_children(kw->children);
-        free(kw);
+        sw_free(kw);
         ti->backend_data = NULL;
     }
 
@@ -832,7 +859,7 @@ static void *kqueue_thread_func(void *arg)
                         pass_filter = sw_pattern_matched(ti->compiled_callback, name);
                     }
                     if (pass_filter) {
-                        kqueue_dispatch_event(sw, target, SWATCHER_EVENT_DELETED, name);
+                        kqueue_dispatch_event(sw, target, SWATCHER_EVENT_DELETED, name, kw->is_directory, NULL);
                     }
                 }
 
@@ -849,9 +876,9 @@ static void *kqueue_thread_func(void *arg)
                     sw_target_internal_destroy(ti);
                 }
                 if (kw->children) free_children(kw->children);
-                free(kw);
-                free(target->path);
-                free(target);
+                sw_free(kw);
+                sw_free(target->path);
+                sw_free(target);
                 continue;
             }
 
@@ -867,7 +894,7 @@ static void *kqueue_thread_func(void *arg)
                         pass_filter = sw_pattern_matched(ti->compiled_callback, name);
                     }
                     if (pass_filter) {
-                        kqueue_dispatch_event(sw, target, SWATCHER_EVENT_MOVED, name);
+                        kqueue_dispatch_event(sw, target, SWATCHER_EVENT_MOVED, name, kw->is_directory, kw->path);
                     }
                 }
 
@@ -883,9 +910,9 @@ static void *kqueue_thread_func(void *arg)
                     sw_target_internal_destroy(ti);
                 }
                 if (kw->children) free_children(kw->children);
-                free(kw);
-                free(target->path);
-                free(target);
+                sw_free(kw);
+                sw_free(target->path);
+                sw_free(target);
                 continue;
             }
 
@@ -901,7 +928,7 @@ static void *kqueue_thread_func(void *arg)
                         pass_filter = sw_pattern_matched(ti->compiled_callback, name);
                     }
                     if (pass_filter) {
-                        kqueue_dispatch_event(sw, target, SWATCHER_EVENT_MODIFIED, name);
+                        kqueue_dispatch_event(sw, target, SWATCHER_EVENT_MODIFIED, name, false, NULL);
                     }
                 }
             }
@@ -918,7 +945,7 @@ static void *kqueue_thread_func(void *arg)
                         pass_filter = sw_pattern_matched(ti->compiled_callback, name);
                     }
                     if (pass_filter) {
-                        kqueue_dispatch_event(sw, target, SWATCHER_EVENT_ATTRIB_CHANGE, name);
+                        kqueue_dispatch_event(sw, target, SWATCHER_EVENT_ATTRIB_CHANGE, name, kw->is_directory, NULL);
                     }
                 }
             }

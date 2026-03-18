@@ -4,6 +4,7 @@
 #include "../internal/internal.h"
 #include "../core/pattern.h"
 #include "../core/error.h"
+#include "../core/vcs.h"
 
 #include <windows.h>
 
@@ -26,6 +27,8 @@ typedef struct coalesce_entry {
     swatcher_fs_event event;
     swatcher_target *target;
     uint64_t timestamp_ms;
+    bool is_dir;
+    char old_path[SW_PATH_MAX];
     UT_hash_handle hh;
 } coalesce_entry;
 
@@ -85,7 +88,7 @@ static WCHAR *utf8_to_wide(const char *utf8)
     if (!utf8) return NULL;
     int len = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
     if (len <= 0) return NULL;
-    WCHAR *wide = malloc(len * sizeof(WCHAR));
+    WCHAR *wide = sw_malloc(len * sizeof(WCHAR));
     if (!wide) return NULL;
     MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, len);
     return wide;
@@ -96,7 +99,7 @@ static char *wide_to_utf8(const WCHAR *wide, int wchar_count)
     if (!wide) return NULL;
     int len = WideCharToMultiByte(CP_UTF8, 0, wide, wchar_count, NULL, 0, NULL, NULL);
     if (len <= 0) return NULL;
-    char *utf8 = malloc(len + 1); /* +1 to guarantee null terminator */
+    char *utf8 = sw_malloc(len + 1); /* +1 to guarantee null terminator */
     if (!utf8) return NULL;
     WideCharToMultiByte(CP_UTF8, 0, wide, wchar_count, utf8, len, NULL, NULL);
     utf8[len] = '\0'; /* WideCharToMultiByte with positive count doesn't null-terminate */
@@ -107,12 +110,17 @@ static char *wide_to_utf8(const WCHAR *wide, int wchar_count)
 
 static void win32_coalesce_dispatch(swatcher *sw, coalesce_entry *ce)
 {
-    (void)sw;
     if (ce->target && ce->target->callback) {
+        if (sw_vcs_should_pause(sw->config, ce->target->path))
+            return;
         const char *name = strrchr(ce->path, '\\');
         if (!name) name = strrchr(ce->path, '/');
         name = name ? name + 1 : ce->path;
-        ce->target->callback(ce->event, ce->target, name, NULL);
+        swatcher_event_info info = {
+            .old_path = ce->old_path[0] ? ce->old_path : NULL,
+            .is_dir = ce->is_dir,
+        };
+        ce->target->callback(ce->event, ce->target, name, &info);
         ce->target->last_event_time = time(NULL);
     }
 }
@@ -126,13 +134,14 @@ static void win32_coalesce_flush(swatcher *sw, uint64_t now_ms, int coalesce_ms,
         if (flush_all || (now_ms - current->timestamp_ms >= (uint64_t)coalesce_ms)) {
             win32_coalesce_dispatch(sw, current);
             HASH_DEL(w->pending_events, current);
-            free(current);
+            sw_free(current);
         }
     }
 }
 
 static void win32_coalesce_add(swatcher *sw, const char *full_path,
-                                swatcher_fs_event event, swatcher_target *target)
+                                swatcher_fs_event event, swatcher_target *target,
+                                bool is_dir, const char *old_path)
 {
     swatcher_win32 *w = WIN32_DATA(sw);
     coalesce_entry *existing = NULL;
@@ -142,7 +151,7 @@ static void win32_coalesce_add(swatcher *sw, const char *full_path,
     if (existing) {
         if (existing->event == SWATCHER_EVENT_CREATED && event == SWATCHER_EVENT_DELETED) {
             HASH_DEL(w->pending_events, existing);
-            free(existing);
+            sw_free(existing);
             return;
         } else if (existing->event == SWATCHER_EVENT_CREATED && event == SWATCHER_EVENT_MODIFIED) {
             existing->timestamp_ms = sw_time_now_ms();
@@ -157,14 +166,28 @@ static void win32_coalesce_add(swatcher *sw, const char *full_path,
         }
         existing->event = event;
         existing->timestamp_ms = sw_time_now_ms();
+        existing->is_dir = is_dir;
+        if (old_path) {
+            strncpy(existing->old_path, old_path, SW_PATH_MAX - 1);
+            existing->old_path[SW_PATH_MAX - 1] = '\0';
+        } else {
+            existing->old_path[0] = '\0';
+        }
     } else {
-        coalesce_entry *ce = malloc(sizeof(coalesce_entry));
+        coalesce_entry *ce = sw_malloc(sizeof(coalesce_entry));
         if (!ce) return;
         strncpy(ce->path, full_path, SW_PATH_MAX - 1);
         ce->path[SW_PATH_MAX - 1] = '\0';
         ce->event = event;
         ce->target = target;
         ce->timestamp_ms = sw_time_now_ms();
+        ce->is_dir = is_dir;
+        if (old_path) {
+            strncpy(ce->old_path, old_path, SW_PATH_MAX - 1);
+            ce->old_path[SW_PATH_MAX - 1] = '\0';
+        } else {
+            ce->old_path[0] = '\0';
+        }
         HASH_ADD_STR(w->pending_events, path, ce);
     }
 }
@@ -173,15 +196,19 @@ static void win32_coalesce_add(swatcher *sw, const char *full_path,
 
 static void win32_dispatch_event(swatcher *sw, swatcher_target *target,
                                   swatcher_fs_event sw_event, const char *name,
-                                  const char *full_path)
+                                  const char *full_path,
+                                  bool is_dir, const char *old_path)
 {
     int coalesce_ms = sw->config->coalesce_ms;
 
     if (coalesce_ms > 0 && full_path) {
-        win32_coalesce_add(sw, full_path, sw_event, target);
+        win32_coalesce_add(sw, full_path, sw_event, target, is_dir, old_path);
     } else {
         if (target->callback) {
-            target->callback(sw_event, target, name, NULL);
+            if (sw_vcs_should_pause(sw->config, target->path))
+                return;
+            swatcher_event_info info = { .old_path = old_path, .is_dir = is_dir };
+            target->callback(sw_event, target, name, &info);
             target->last_event_time = time(NULL);
         }
     }
@@ -194,6 +221,9 @@ static void process_directory_changes(swatcher *sw, const char *buffer,
     const char *p = buffer;
     FILE_NOTIFY_INFORMATION *fni = NULL;
     char fullpath[SW_PATH_MAX * 2];
+    char rename_old_path[SW_PATH_MAX];
+    rename_old_path[0] = '\0';
+    bool rename_old_is_dir = false;
 
     do {
         fni = (FILE_NOTIFY_INFORMATION *)p;
@@ -209,7 +239,28 @@ static void process_directory_changes(swatcher *sw, const char *buffer,
 
         snprintf(fullpath, sizeof(fullpath), "%s\\%s", tw->target->path, filenameUTF8);
 
+        /* Handle rename pairing: OLD_NAME is immediately followed by NEW_NAME */
+        if (fni->Action == FILE_ACTION_RENAMED_OLD_NAME) {
+            strncpy(rename_old_path, fullpath, SW_PATH_MAX - 1);
+            rename_old_path[SW_PATH_MAX - 1] = '\0';
+            rename_old_is_dir = false;
+            sw_free(filenameUTF8);
+            p += fni->NextEntryOffset;
+            if (fni->NextEntryOffset == 0) break;
+            continue;
+        }
+
         swatcher_fs_event event = action_to_swatcher_event(fni->Action);
+
+        /* Determine old_path and is_dir for dispatch */
+        bool is_dir = false;
+        const char *old_path = NULL;
+        if (fni->Action == FILE_ACTION_RENAMED_NEW_NAME) {
+            old_path = rename_old_path[0] ? rename_old_path : NULL;
+            is_dir = rename_old_is_dir;
+            rename_old_path[0] = '\0';
+        }
+
         if (event != SWATCHER_EVENT_NONE && tw->target->callback) {
             /* Check event mask */
             if ((tw->target->events & event) || (tw->target->events == SWATCHER_EVENT_ALL)) {
@@ -220,15 +271,15 @@ static void process_directory_changes(swatcher *sw, const char *buffer,
                 swatcher_target_internal *ti = SW_TARGET_INTERNAL(tw->target);
                 if (ti && ti->compiled_callback) {
                     if (sw_pattern_matched(ti->compiled_callback, name)) {
-                        win32_dispatch_event(sw, tw->target, event, fullpath, fullpath);
+                        win32_dispatch_event(sw, tw->target, event, fullpath, fullpath, is_dir, old_path);
                     }
                 } else {
-                    win32_dispatch_event(sw, tw->target, event, fullpath, fullpath);
+                    win32_dispatch_event(sw, tw->target, event, fullpath, fullpath, is_dir, old_path);
                 }
             }
         }
 
-        free(filenameUTF8);
+        sw_free(filenameUTF8);
         p += fni->NextEntryOffset;
     } while (fni->NextEntryOffset != 0);
 }
@@ -248,7 +299,7 @@ static bool win32_issue_read(swatcher_target_win32 *tw)
 
 static bool win32_init(swatcher *sw)
 {
-    swatcher_win32 *w = malloc(sizeof(swatcher_win32));
+    swatcher_win32 *w = sw_malloc(sizeof(swatcher_win32));
     if (!w) {
         sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_win32");
@@ -263,7 +314,7 @@ static bool win32_init(swatcher *sw)
     if (!w->iocp) {
         sw_set_error(SWATCHER_ERR_BACKEND_INIT);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to create IOCP (error %lu)", GetLastError());
-        free(w);
+        sw_free(w);
         return false;
     }
 
@@ -280,7 +331,7 @@ static void win32_destroy(swatcher *sw)
     coalesce_entry *ce, *ce_tmp;
     HASH_ITER(hh, w->pending_events, ce, ce_tmp) {
         HASH_DEL(w->pending_events, ce);
-        free(ce);
+        sw_free(ce);
     }
 
     /* Close all watch handles and free targets */
@@ -289,12 +340,12 @@ static void win32_destroy(swatcher *sw)
         CancelIo(current->watchHandle);
         CloseHandle(current->watchHandle);
         HASH_DEL(w->handles_to_targets, current);
-        free(current->buffer);
-        free(current);
+        sw_free(current->buffer);
+        sw_free(current);
     }
 
     if (w->iocp) CloseHandle(w->iocp);
-    free(w);
+    sw_free(w);
     SW_INTERNAL(sw)->backend_data = NULL;
 }
 
@@ -308,7 +359,7 @@ static bool win32_add_target(swatcher *sw, swatcher_target *target)
         return false;
     }
 
-    swatcher_target_win32 *tw = malloc(sizeof(swatcher_target_win32));
+    swatcher_target_win32 *tw = sw_malloc(sizeof(swatcher_target_win32));
     if (!tw) {
         sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_target_win32");
@@ -318,11 +369,11 @@ static bool win32_add_target(swatcher *sw, swatcher_target *target)
 
     /* Allocate notification buffer (larger for UNC paths) */
     tw->buffer_size = is_unc_path(target->path) ? UNC_BUFFER_SIZE : DEFAULT_BUFFER_SIZE;
-    tw->buffer = malloc(tw->buffer_size);
+    tw->buffer = sw_malloc(tw->buffer_size);
     if (!tw->buffer) {
         sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate notification buffer");
-        free(tw);
+        sw_free(tw);
         return false;
     }
 
@@ -335,8 +386,8 @@ static bool win32_add_target(swatcher *sw, swatcher_target *target)
     if (!wide_path) {
         sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to convert path to UTF-16: %s", target->path);
-        free(tw->buffer);
-        free(tw);
+        sw_free(tw->buffer);
+        sw_free(tw);
         return false;
     }
 
@@ -346,14 +397,14 @@ static bool win32_add_target(swatcher *sw, swatcher_target *target)
                                      NULL, OPEN_EXISTING,
                                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
                                      NULL);
-    free(wide_path);
+    sw_free(wide_path);
 
     if (dir_handle == INVALID_HANDLE_VALUE) {
         sw_set_error(SWATCHER_ERR_INVALID_PATH);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to open directory: %s (error %lu)",
                                     target->path, GetLastError());
-        free(tw->buffer);
-        free(tw);
+        sw_free(tw->buffer);
+        sw_free(tw);
         return false;
     }
     tw->watchHandle = dir_handle;
@@ -363,8 +414,8 @@ static bool win32_add_target(swatcher *sw, swatcher_target *target)
         sw_set_error(SWATCHER_ERR_BACKEND_INIT);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to associate handle with IOCP (error %lu)", GetLastError());
         CloseHandle(dir_handle);
-        free(tw->buffer);
-        free(tw);
+        sw_free(tw->buffer);
+        sw_free(tw);
         return false;
     }
 
@@ -374,8 +425,8 @@ static bool win32_add_target(swatcher *sw, swatcher_target *target)
         SWATCHER_LOG_DEFAULT_ERROR("Failed to start watching directory: %s (error %lu)",
                                     target->path, GetLastError());
         CloseHandle(dir_handle);
-        free(tw->buffer);
-        free(tw);
+        sw_free(tw->buffer);
+        sw_free(tw);
         return false;
     }
 
@@ -391,8 +442,8 @@ static bool win32_add_target(swatcher *sw, swatcher_target *target)
             CancelIo(dir_handle);
             CloseHandle(dir_handle);
             HASH_DEL(w->handles_to_targets, tw);
-            free(tw->buffer);
-            free(tw);
+            sw_free(tw->buffer);
+            sw_free(tw);
             return false;
         }
     }
@@ -415,8 +466,8 @@ static bool win32_remove_target(swatcher *sw, swatcher_target *target)
         CancelIo(tw->watchHandle);
         CloseHandle(tw->watchHandle);
         HASH_DEL(w->handles_to_targets, tw);
-        free(tw->buffer);
-        free(tw);
+        sw_free(tw->buffer);
+        sw_free(tw);
         ti->backend_data = NULL;
     }
 

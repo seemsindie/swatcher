@@ -15,7 +15,13 @@ SWATCHER_API bool swatcher_init_with_backend(swatcher *sw, swatcher_config *conf
         return false;
     }
 
-    swatcher_internal *si = malloc(sizeof(swatcher_internal));
+    /* Install the custom allocator (if any) before the first allocation */
+    if (config->allocator)
+        sw_alloc_set(config->allocator);
+    else
+        sw_alloc_clear();
+
+    swatcher_internal *si = sw_malloc(sizeof(swatcher_internal));
     if (!si) {
         sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_internal");
@@ -26,7 +32,7 @@ SWATCHER_API bool swatcher_init_with_backend(swatcher *sw, swatcher_config *conf
     if (!si->mutex) {
         sw_set_error(SWATCHER_ERR_MUTEX);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to create mutex");
-        free(si);
+        sw_free(si);
         return false;
     }
 
@@ -36,7 +42,7 @@ SWATCHER_API bool swatcher_init_with_backend(swatcher *sw, swatcher_config *conf
             sw_set_error(SWATCHER_ERR_BACKEND_NOT_FOUND);
             SWATCHER_LOG_DEFAULT_ERROR("Backend not found: %s", backend_name);
             sw_mutex_destroy(si->mutex);
-            free(si);
+            sw_free(si);
             return false;
         }
     } else {
@@ -55,7 +61,7 @@ SWATCHER_API bool swatcher_init_with_backend(swatcher *sw, swatcher_config *conf
         sw_set_error(SWATCHER_ERR_BACKEND_INIT);
         SWATCHER_LOG_DEFAULT_ERROR("Backend init failed");
         sw_mutex_destroy(si->mutex);
-        free(si);
+        sw_free(si);
         sw->_internal = NULL;
         return false;
     }
@@ -120,6 +126,12 @@ SWATCHER_API bool swatcher_add(swatcher *sw, swatcher_target *target)
 
     sw_mutex_lock(si->mutex);
 
+    /* Warn if target path is on a remote filesystem */
+    if (sw_filesystem_is_remote(target->path)) {
+        SWATCHER_LOG_DEFAULT_WARNING("Path is on a remote filesystem — notifications may be unreliable: %s",
+                                      target->path);
+    }
+
     /* Internal struct (with compiled patterns) is created in swatcher_target_create() */
     swatcher_target_internal *ti = SW_TARGET_INTERNAL(target);
     if (!ti) {
@@ -156,8 +168,8 @@ SWATCHER_API bool swatcher_remove(swatcher *sw, swatcher_target *target)
         sw_target_internal_destroy(ti);
     }
 
-    free(target->path);
-    free(target);
+    sw_free(target->path);
+    sw_free(target);
 
     sw_mutex_unlock(si->mutex);
     return true;
@@ -176,16 +188,20 @@ SWATCHER_API void swatcher_cleanup(swatcher *sw)
         HASH_DELETE(hh_global, si->targets, current);
         swatcher_target *t = current->target;
         current->target = NULL; /* prevent use-after-free in destroy */
-        free(t->path);
-        free(t);
+        sw_free(t->path);
+        sw_free(t);
         sw_target_internal_destroy(current);
     }
 
     si->backend->destroy(sw);
 
     sw_mutex_destroy(si->mutex);
-    free(si);
+    sw_free(si);
     sw->_internal = NULL;
+    /* NOTE: don't clear the allocator here — swatcher_destroy still needs
+     * it for the final sw_free(sw). The allocator is cleared automatically
+     * when the next swatcher_init installs one, or the user can call
+     * sw_alloc_clear() manually if using the init/cleanup API. */
 }
 
 SWATCHER_API swatcher *swatcher_create(swatcher_config *config)
@@ -195,13 +211,17 @@ SWATCHER_API swatcher *swatcher_create(swatcher_config *config)
 
 SWATCHER_API swatcher *swatcher_create_with_backend(swatcher_config *config, const char *backend_name)
 {
-    swatcher *sw = malloc(sizeof(swatcher));
+    /* Pre-install allocator so the swatcher struct itself can use it */
+    if (config && config->allocator)
+        sw_alloc_set(config->allocator);
+
+    swatcher *sw = sw_malloc(sizeof(swatcher));
     if (!sw) {
         sw_set_error(SWATCHER_ERR_ALLOC);
         return NULL;
     }
     if (!swatcher_init_with_backend(sw, config, backend_name)) {
-        free(sw);
+        sw_free(sw);
         return NULL;
     }
     return sw;
@@ -212,7 +232,8 @@ SWATCHER_API void swatcher_destroy(swatcher *sw)
     if (!sw) return;
     swatcher_stop(sw);
     swatcher_cleanup(sw);
-    free(sw);
+    sw_free(sw);
+    sw_alloc_clear();
 }
 
 SWATCHER_API const char **swatcher_backends_available(void)

@@ -69,4 +69,7 @@ void sw_sleep_ms(int ms);
 /* String */
 char *sw_strdup(const char *s);
 
+/* Remote filesystem detection */
+bool sw_filesystem_is_remote(const char *path);
+
 #endif /* SWATCHER_PLATFORM_H */

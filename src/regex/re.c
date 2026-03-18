@@ -5,6 +5,7 @@
  */
 
 #include "re.h"
+#include "../internal/alloc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -162,7 +163,7 @@ re_t re_compile(const char *pattern)
     /* Allocate a single block: regex_t array + ccl buffer */
     size_t obj_size = sizeof(regex_t) * MAX_REGEXP_OBJECTS;
     size_t total = obj_size + MAX_CHAR_CLASS_LEN;
-    char *block = malloc(total);
+    char *block = sw_malloc(total);
     if (!block)
         return NULL;
 
@@ -185,7 +186,7 @@ re_t re_compile(const char *pattern)
 
 void re_free(re_t pattern)
 {
-    free(pattern);
+    sw_free(pattern);
 }
 
 /* ========== Private functions ========== */

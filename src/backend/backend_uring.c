@@ -1,23 +1,28 @@
-#if defined(__linux__) || defined(__unix__) || defined(__unix) || defined(unix)
+#if defined(__linux__)
 
 #include "swatcher.h"
 #include "../internal/internal.h"
+#include "../internal/uring_syscall.h"
 #include "../core/error.h"
-
-#include <sys/inotify.h>
-#include <unistd.h>
-#include <poll.h>
-#include <errno.h>
-
-/* Pattern matching via compiled patterns */
 #include "../core/pattern.h"
 #include "../core/rescan.h"
 #include "../core/vcs.h"
 
-#define EVENT_SIZE (sizeof(struct inotify_event))
-#define BUF_LEN    (1024 * (EVENT_SIZE + 16))
+#include <sys/inotify.h>
+#include <sys/mman.h>
+#include <poll.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#include <stdio.h>
 
-/* ========== Local types ========== */
+/* ========== Constants ========== */
+
+#define URING_ENTRIES     32
+#define URING_READ_BUFSZ  8192
+#define EVENT_SIZE        (sizeof(struct inotify_event))
+
+/* ========== Local types (mirrors inotify backend) ========== */
 
 typedef struct swatcher_target_inotify {
     int wd;
@@ -31,13 +36,12 @@ typedef struct coalesce_entry {
     swatcher_target *target;
     uint64_t timestamp_ms;
     bool is_dir;
-    char old_path[SW_PATH_MAX]; /* populated for MOVED events */
+    char old_path[SW_PATH_MAX];
     UT_hash_handle hh;
 } coalesce_entry;
 
-/* Pending IN_MOVED_FROM entries awaiting a matching IN_MOVED_TO */
 typedef struct move_pending {
-    uint32_t cookie;            /* hash key */
+    uint32_t cookie;
     char path[SW_PATH_MAX];
     swatcher_target *target;
     bool is_dir;
@@ -45,19 +49,107 @@ typedef struct move_pending {
     UT_hash_handle hh;
 } move_pending;
 
-typedef struct swatcher_inotify {
+typedef struct swatcher_uring {
     int inotify_fd;
-    struct pollfd fds;
+    int ring_fd;
+    void *sq_ring;
+    void *cq_ring;
+    void *sqes;
+    struct io_sqring_offsets sq_off;
+    struct io_cqring_offsets cq_off;
+    unsigned sq_entries;
+    unsigned cq_entries;
+    size_t sq_ring_sz;
+    size_t cq_ring_sz;
+    size_t sqes_sz;
+    /* inotify target tracking */
     swatcher_target_inotify *wd_to_target;
     int watch_count;
     int max_watches;
     coalesce_entry *pending_events;
-    move_pending *pending_moves; /* cookie -> FROM path */
-} swatcher_inotify;
+    move_pending *pending_moves;
+    char read_buf[URING_READ_BUFSZ] __attribute__((aligned(8)));
+} swatcher_uring;
 
-#define INOTIFY_DATA(sw) ((swatcher_inotify *)SW_INTERNAL(sw)->backend_data)
+#define URING_DATA(sw) ((swatcher_uring *)SW_INTERNAL(sw)->backend_data)
 
-/* ========== Helpers ========== */
+/* ========== io_uring ring helpers ========== */
+
+static inline uint32_t *uring_sq_head(swatcher_uring *u)
+{
+    return (uint32_t *)((char *)u->sq_ring + u->sq_off.head);
+}
+
+static inline uint32_t *uring_sq_tail(swatcher_uring *u)
+{
+    return (uint32_t *)((char *)u->sq_ring + u->sq_off.tail);
+}
+
+static inline uint32_t *uring_sq_ring_mask(swatcher_uring *u)
+{
+    return (uint32_t *)((char *)u->sq_ring + u->sq_off.ring_mask);
+}
+
+static inline uint32_t *uring_sq_array(swatcher_uring *u)
+{
+    return (uint32_t *)((char *)u->sq_ring + u->sq_off.array);
+}
+
+static inline uint32_t *uring_cq_head(swatcher_uring *u)
+{
+    return (uint32_t *)((char *)u->cq_ring + u->cq_off.head);
+}
+
+static inline uint32_t *uring_cq_tail(swatcher_uring *u)
+{
+    return (uint32_t *)((char *)u->cq_ring + u->cq_off.tail);
+}
+
+static inline uint32_t *uring_cq_ring_mask(swatcher_uring *u)
+{
+    return (uint32_t *)((char *)u->cq_ring + u->cq_off.ring_mask);
+}
+
+static inline struct io_uring_cqe *uring_cqe_at(swatcher_uring *u, uint32_t idx)
+{
+    struct io_uring_cqe *cqes = (struct io_uring_cqe *)((char *)u->cq_ring + u->cq_off.cqes);
+    return &cqes[idx & *uring_cq_ring_mask(u)];
+}
+
+/* Memory barriers for shared ring access */
+#define io_uring_smp_store_release(p, v)  __atomic_store_n((p), (v), __ATOMIC_RELEASE)
+#define io_uring_smp_load_acquire(p)      __atomic_load_n((p), __ATOMIC_ACQUIRE)
+
+/* Submit an IORING_OP_READ for the inotify fd into read_buf */
+static bool uring_submit_read(swatcher_uring *u)
+{
+    uint32_t tail = io_uring_smp_load_acquire(uring_sq_tail(u));
+    uint32_t head = io_uring_smp_load_acquire(uring_sq_head(u));
+    uint32_t mask = *uring_sq_ring_mask(u);
+
+    /* Check if the SQ is full */
+    if ((tail - head) >= u->sq_entries)
+        return false;
+
+    uint32_t idx = tail & mask;
+    struct io_uring_sqe *sqe = &((struct io_uring_sqe *)u->sqes)[idx];
+
+    memset(sqe, 0, sizeof(*sqe));
+    sqe->opcode = IORING_OP_READ;
+    sqe->fd = u->inotify_fd;
+    sqe->addr = (uint64_t)(uintptr_t)u->read_buf;
+    sqe->len = URING_READ_BUFSZ;
+    sqe->off = (uint64_t)-1; /* read at current position */
+    sqe->user_data = 1;      /* tag: inotify read */
+
+    /* Update the SQ array and tail */
+    uring_sq_array(u)[idx] = idx;
+    io_uring_smp_store_release(uring_sq_tail(u), tail + 1);
+
+    return true;
+}
+
+/* ========== Helpers (same as inotify backend) ========== */
 
 static uint32_t events_to_inotify_mask(swatcher_target *target)
 {
@@ -95,7 +187,7 @@ static swatcher_fs_event inotify_to_swatcher_event(uint32_t mask)
 
 /* ========== inotify limit checking ========== */
 
-static int inotify_get_max_watches(void)
+static int uring_get_max_watches(void)
 {
     FILE *f = fopen("/proc/sys/fs/inotify/max_user_watches", "r");
     if (!f) return -1;
@@ -107,11 +199,11 @@ static int inotify_get_max_watches(void)
     return val;
 }
 
-/* ========== add single watch (called with mutex held) ========== */
+/* ========== add single watch ========== */
 
-static bool inotify_add_single(swatcher *sw, swatcher_target *target)
+static bool uring_add_single(swatcher *sw, swatcher_target *target)
 {
-    swatcher_inotify *ino = INOTIFY_DATA(sw);
+    swatcher_uring *u = URING_DATA(sw);
 
     if (sw_find_target_internal(sw, target->path)) {
         sw_set_error(SWATCHER_ERR_TARGET_EXISTS);
@@ -119,13 +211,12 @@ static bool inotify_add_single(swatcher *sw, swatcher_target *target)
         return false;
     }
 
-    /* Check inotify limits */
-    if (ino->max_watches > 0 && ino->watch_count >= (int)(ino->max_watches * 0.9)) {
+    if (u->max_watches > 0 && u->watch_count >= (int)(u->max_watches * 0.9)) {
         SWATCHER_LOG_DEFAULT_WARNING("Approaching inotify watch limit (%d/%d): %s",
-                                      ino->watch_count, ino->max_watches, target->path);
+                                      u->watch_count, u->max_watches, target->path);
     }
 
-    SWATCHER_LOG_DEFAULT_INFO("Target %s is being watched", target->path);
+    SWATCHER_LOG_DEFAULT_INFO("Target %s is being watched (io_uring)", target->path);
 
     swatcher_target_inotify *ino_target = sw_malloc(sizeof(swatcher_target_inotify));
     if (!ino_target) {
@@ -135,14 +226,14 @@ static bool inotify_add_single(swatcher *sw, swatcher_target *target)
     }
 
     ino_target->target = target;
-    ino_target->wd = inotify_add_watch(ino->inotify_fd, target->path, events_to_inotify_mask(target));
+    ino_target->wd = inotify_add_watch(u->inotify_fd, target->path, events_to_inotify_mask(target));
     if (ino_target->wd < 0) {
         if (errno == ENOSPC) {
             sw_set_error(SWATCHER_ERR_WATCH_LIMIT);
             SWATCHER_LOG_DEFAULT_ERROR(
                 "inotify watch limit reached (%d/%d). "
                 "Increase via: sysctl fs.inotify.max_user_watches=524288",
-                ino->watch_count, ino->max_watches);
+                u->watch_count, u->max_watches);
         } else {
             sw_set_error(SWATCHER_ERR_BACKEND_INIT);
             SWATCHER_LOG_DEFAULT_ERROR("Failed to add watch for %s: %s",
@@ -152,18 +243,17 @@ static bool inotify_add_single(swatcher *sw, swatcher_target *target)
         return false;
     }
 
-    HASH_ADD_INT(ino->wd_to_target, wd, ino_target);
-    ino->watch_count++;
+    HASH_ADD_INT(u->wd_to_target, wd, ino_target);
+    u->watch_count++;
 
-    /* Create target internal and add to hash */
     swatcher_target_internal *ti = SW_TARGET_INTERNAL(target);
     if (!ti) {
         ti = sw_target_internal_create(target);
         if (!ti) {
             SWATCHER_LOG_DEFAULT_ERROR("Failed to create target internal");
-            inotify_rm_watch(ino->inotify_fd, ino_target->wd);
-            HASH_DEL(ino->wd_to_target, ino_target);
-            ino->watch_count--;
+            inotify_rm_watch(u->inotify_fd, ino_target->wd);
+            HASH_DEL(u->wd_to_target, ino_target);
+            u->watch_count--;
             sw_free(ino_target);
             return false;
         }
@@ -174,12 +264,12 @@ static bool inotify_add_single(swatcher *sw, swatcher_target *target)
     return true;
 }
 
-/* ========== Recursive add (called with mutex held) ========== */
+/* ========== Recursive add ========== */
 
-static bool inotify_add_recursive_locked(swatcher *sw, swatcher_target *original_target, bool dont_add_self)
+static bool uring_add_recursive_locked(swatcher *sw, swatcher_target *original_target, bool dont_add_self)
 {
     if (original_target->is_file) {
-        return inotify_add_single(sw, original_target);
+        return uring_add_single(sw, original_target);
     }
 
     sw_dir *dir = sw_dir_open(original_target->path);
@@ -234,7 +324,7 @@ static bool inotify_add_recursive_locked(swatcher *sw, swatcher_target *original
                                   (SW_TARGET_INTERNAL(original_target)->compiled_watch &&
                                    !sw_pattern_matched(SW_TARGET_INTERNAL(original_target)->compiled_watch, entry.name)));
 
-                if (!inotify_add_recursive_locked(sw, new_target, skip_self)) {
+                if (!uring_add_recursive_locked(sw, new_target, skip_self)) {
                     SWATCHER_LOG_DEFAULT_WARNING("Failed to add watch for %s", new_target->path);
                     sw_free(new_target->path);
                     sw_free(new_target);
@@ -270,7 +360,7 @@ static bool inotify_add_recursive_locked(swatcher *sw, swatcher_target *original
                         continue;
                     }
 
-                    if (!inotify_add_single(sw, new_target)) {
+                    if (!uring_add_single(sw, new_target)) {
                         SWATCHER_LOG_DEFAULT_WARNING("Failed to add watch (file) for %s", new_target->path);
                         sw_free(new_target->path);
                         sw_free(new_target);
@@ -308,7 +398,7 @@ static bool inotify_add_recursive_locked(swatcher *sw, swatcher_target *original
                     if (new_target->is_file) {
                         if (original_target->watch_options & SWATCHER_WATCH_FILES ||
                             original_target->watch_options == SWATCHER_WATCH_ALL) {
-                            if (!inotify_add_single(sw, new_target)) {
+                            if (!uring_add_single(sw, new_target)) {
                                 sw_free(new_target->path);
                                 sw_free(new_target);
                                 continue;
@@ -321,7 +411,7 @@ static bool inotify_add_recursive_locked(swatcher *sw, swatcher_target *original
                     } else {
                         if (original_target->watch_options & SWATCHER_WATCH_DIRECTORIES ||
                             original_target->watch_options == SWATCHER_WATCH_ALL) {
-                            if (!inotify_add_recursive_locked(sw, new_target, false)) {
+                            if (!uring_add_recursive_locked(sw, new_target, false)) {
                                 sw_free(new_target->path);
                                 sw_free(new_target);
                                 continue;
@@ -362,7 +452,7 @@ static bool inotify_add_recursive_locked(swatcher *sw, swatcher_target *original
                             continue;
                         }
 
-                        if (!inotify_add_single(sw, new_target)) {
+                        if (!uring_add_single(sw, new_target)) {
                             sw_free(new_target->path);
                             sw_free(new_target);
                             continue;
@@ -378,31 +468,30 @@ static bool inotify_add_recursive_locked(swatcher *sw, swatcher_target *original
     if (dont_add_self)
         return true;
 
-    return inotify_add_single(sw, original_target);
+    return uring_add_single(sw, original_target);
 }
 
-/* ========== Dynamic recursive helpers (called with mutex held) ========== */
+/* ========== Dynamic recursive helpers ========== */
 
-static void inotify_remove_children(swatcher *sw, const char *dir_path)
+static void uring_remove_children(swatcher *sw, const char *dir_path)
 {
-    swatcher_inotify *ino = INOTIFY_DATA(sw);
+    swatcher_uring *u = URING_DATA(sw);
     size_t dir_len = strlen(dir_path);
 
     swatcher_target_inotify *current, *tmp;
-    HASH_ITER(hh, ino->wd_to_target, current, tmp) {
+    HASH_ITER(hh, u->wd_to_target, current, tmp) {
         const char *tpath = current->target->path;
-        /* Check if target path starts with dir_path/ */
         if (strncmp(tpath, dir_path, dir_len) == 0 && tpath[dir_len] == '/') {
-            inotify_rm_watch(ino->inotify_fd, current->wd);
-            HASH_DEL(ino->wd_to_target, current);
-            ino->watch_count--;
+            inotify_rm_watch(u->inotify_fd, current->wd);
+            HASH_DEL(u->wd_to_target, current);
+            u->watch_count--;
 
             swatcher_target_internal *ti = SW_TARGET_INTERNAL(current->target);
             swatcher_target *t = current->target;
             if (ti) {
                 sw_remove_target_internal(sw, ti);
                 ti->backend_data = NULL;
-                ti->target = NULL; /* prevent use-after-free in destroy */
+                ti->target = NULL;
                 sw_target_internal_destroy(ti);
             }
             sw_free(t->path);
@@ -412,7 +501,7 @@ static void inotify_remove_children(swatcher *sw, const char *dir_path)
     }
 }
 
-static void inotify_handle_dynamic_mkdir(swatcher *sw, swatcher_target *parent, const char *name)
+static void uring_handle_dynamic_mkdir(swatcher *sw, swatcher_target *parent, const char *name)
 {
     if (!parent->is_recursive) return;
 
@@ -423,7 +512,6 @@ static void inotify_handle_dynamic_mkdir(swatcher *sw, swatcher_target *parent, 
     else
         snprintf(new_path, SW_PATH_MAX, "%s/%s", parent->path, name);
 
-    /* Already watched? */
     if (sw_find_target_internal(sw, new_path))
         return;
 
@@ -446,15 +534,14 @@ static void inotify_handle_dynamic_mkdir(swatcher *sw, swatcher_target *parent, 
         return;
     }
 
-    /* Add the new dir and scan its contents (handles race where files appeared before watch) */
-    if (!inotify_add_recursive_locked(sw, new_target, false)) {
+    if (!uring_add_recursive_locked(sw, new_target, false)) {
         SWATCHER_LOG_DEFAULT_WARNING("Failed to watch new dir: %s", new_path);
         sw_free(new_target->path);
         sw_free(new_target);
     }
 }
 
-static void inotify_handle_dynamic_rmdir(swatcher *sw, swatcher_target *parent, const char *name)
+static void uring_handle_dynamic_rmdir(swatcher *sw, swatcher_target *parent, const char *name)
 {
     char dir_path[SW_PATH_MAX];
     size_t plen = strlen(parent->path);
@@ -463,40 +550,37 @@ static void inotify_handle_dynamic_rmdir(swatcher *sw, swatcher_target *parent, 
     else
         snprintf(dir_path, SW_PATH_MAX, "%s/%s", parent->path, name);
 
-    inotify_remove_children(sw, dir_path);
+    uring_remove_children(sw, dir_path);
 
-    /* Remove the directory's own watch if it exists */
-    swatcher_inotify *ino = INOTIFY_DATA(sw);
+    swatcher_uring *u = URING_DATA(sw);
     swatcher_target_internal *ti = sw_find_target_internal(sw, dir_path);
     if (ti) {
         swatcher_target_inotify *ino_target = (swatcher_target_inotify *)ti->backend_data;
         if (ino_target) {
-            inotify_rm_watch(ino->inotify_fd, ino_target->wd);
-            HASH_DEL(ino->wd_to_target, ino_target);
-            ino->watch_count--;
+            inotify_rm_watch(u->inotify_fd, ino_target->wd);
+            HASH_DEL(u->wd_to_target, ino_target);
+            u->watch_count--;
             sw_free(ino_target);
             ti->backend_data = NULL;
         }
         sw_remove_target_internal(sw, ti);
         swatcher_target *t = ti->target;
-        ti->target = NULL; /* prevent use-after-free in destroy */
+        ti->target = NULL;
         sw_free(t->path);
         sw_free(t);
         sw_target_internal_destroy(ti);
     }
 }
 
-/* ========== IN_Q_OVERFLOW rescan (called with mutex held) ========== */
+/* ========== Rescan on overflow ========== */
 
-static void inotify_rescan_all(swatcher *sw)
+static void uring_rescan_all(swatcher *sw)
 {
-    swatcher_inotify *ino = INOTIFY_DATA(sw);
+    swatcher_uring *u = URING_DATA(sw);
 
-    /* Collect all current recursive targets for rescan */
     swatcher_target_inotify *current, *tmp;
-    HASH_ITER(hh, ino->wd_to_target, current, tmp) {
+    HASH_ITER(hh, u->wd_to_target, current, tmp) {
         if (current->target->is_recursive && current->target->is_directory) {
-            /* Re-scan this directory for new subdirs */
             sw_dir *dir = sw_dir_open(current->target->path);
             if (!dir) continue;
 
@@ -514,7 +598,7 @@ static void inotify_rescan_all(swatcher *sw)
                     snprintf(child_path, SW_PATH_MAX, "%s/%s", current->target->path, entry.name);
 
                 if (!sw_find_target_internal(sw, child_path)) {
-                    inotify_handle_dynamic_mkdir(sw, current->target, entry.name);
+                    uring_handle_dynamic_mkdir(sw, current->target, entry.name);
                 }
             }
             sw_dir_close(dir);
@@ -524,7 +608,7 @@ static void inotify_rescan_all(swatcher *sw)
 
 /* ========== Event coalescing ========== */
 
-static void inotify_coalesce_dispatch(swatcher *sw, coalesce_entry *ce)
+static void uring_coalesce_dispatch(swatcher *sw, coalesce_entry *ce)
 {
     if (ce->target && ce->target->callback) {
         if (sw_vcs_should_pause(sw->config, ce->target->path))
@@ -540,33 +624,32 @@ static void inotify_coalesce_dispatch(swatcher *sw, coalesce_entry *ce)
     }
 }
 
-static void inotify_coalesce_flush(swatcher *sw, uint64_t now_ms, int coalesce_ms, bool flush_all)
+static void uring_coalesce_flush(swatcher *sw, uint64_t now_ms, int coalesce_ms, bool flush_all)
 {
-    swatcher_inotify *ino = INOTIFY_DATA(sw);
+    swatcher_uring *u = URING_DATA(sw);
     coalesce_entry *current, *tmp;
 
-    HASH_ITER(hh, ino->pending_events, current, tmp) {
+    HASH_ITER(hh, u->pending_events, current, tmp) {
         if (flush_all || (now_ms - current->timestamp_ms >= (uint64_t)coalesce_ms)) {
-            inotify_coalesce_dispatch(sw, current);
-            HASH_DEL(ino->pending_events, current);
+            uring_coalesce_dispatch(sw, current);
+            HASH_DEL(u->pending_events, current);
             sw_free(current);
         }
     }
 }
 
-static void inotify_coalesce_add(swatcher *sw, const char *full_path,
-                                  swatcher_fs_event event, swatcher_target *target,
-                                  bool is_dir, const char *old_path)
+static void uring_coalesce_add(swatcher *sw, const char *full_path,
+                                swatcher_fs_event event, swatcher_target *target,
+                                bool is_dir, const char *old_path)
 {
-    swatcher_inotify *ino = INOTIFY_DATA(sw);
+    swatcher_uring *u = URING_DATA(sw);
     coalesce_entry *existing = NULL;
 
-    HASH_FIND_STR(ino->pending_events, full_path, existing);
+    HASH_FIND_STR(u->pending_events, full_path, existing);
 
     if (existing) {
-        /* Merge rules */
         if (existing->event == SWATCHER_EVENT_CREATED && event == SWATCHER_EVENT_DELETED) {
-            HASH_DEL(ino->pending_events, existing);
+            HASH_DEL(u->pending_events, existing);
             sw_free(existing);
             return;
         } else if (existing->event == SWATCHER_EVENT_CREATED && event == SWATCHER_EVENT_MODIFIED) {
@@ -604,102 +687,13 @@ static void inotify_coalesce_add(swatcher *sw, const char *full_path,
         } else {
             ce->old_path[0] = '\0';
         }
-        HASH_ADD_STR(ino->pending_events, path, ce);
+        HASH_ADD_STR(u->pending_events, path, ce);
     }
 }
 
-/* ========== Vtable functions ========== */
-
-static bool inotify_init_backend(swatcher *sw)
-{
-    swatcher_inotify *ino = sw_malloc(sizeof(swatcher_inotify));
-    if (!ino) {
-        SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_inotify");
-        return false;
-    }
-
-    ino->inotify_fd = inotify_init();
-    if (ino->inotify_fd < 0) {
-        SWATCHER_LOG_DEFAULT_ERROR("Failed to initialize inotify");
-        sw_free(ino);
-        return false;
-    }
-
-    ino->fds.fd = ino->inotify_fd;
-    ino->fds.events = POLLIN;
-    ino->wd_to_target = NULL;
-    ino->watch_count = 0;
-    ino->max_watches = inotify_get_max_watches();
-    ino->pending_events = NULL;
-    ino->pending_moves = NULL;
-
-    SW_INTERNAL(sw)->backend_data = ino;
-    return true;
-}
-
-static void inotify_destroy(swatcher *sw)
-{
-    swatcher_inotify *ino = INOTIFY_DATA(sw);
-    if (!ino) return;
-
-    /* Flush and free pending coalesce events */
-    coalesce_entry *ce, *ce_tmp;
-    HASH_ITER(hh, ino->pending_events, ce, ce_tmp) {
-        HASH_DEL(ino->pending_events, ce);
-        sw_free(ce);
-    }
-
-    /* Free pending move entries */
-    move_pending *mp, *mp_tmp;
-    HASH_ITER(hh, ino->pending_moves, mp, mp_tmp) {
-        HASH_DEL(ino->pending_moves, mp);
-        sw_free(mp);
-    }
-
-    /* Remove all inotify watches */
-    swatcher_target_inotify *current, *tmp;
-    HASH_ITER(hh, ino->wd_to_target, current, tmp) {
-        inotify_rm_watch(ino->inotify_fd, current->wd);
-        HASH_DEL(ino->wd_to_target, current);
-        sw_free(current);
-    }
-
-    close(ino->inotify_fd);
-    sw_free(ino);
-    SW_INTERNAL(sw)->backend_data = NULL;
-}
-
-static bool inotify_add_target(swatcher *sw, swatcher_target *target)
-{
-    return inotify_add_single(sw, target);
-}
-
-static bool inotify_remove_target(swatcher *sw, swatcher_target *target)
-{
-    swatcher_inotify *ino = INOTIFY_DATA(sw);
-    swatcher_target_internal *ti = SW_TARGET_INTERNAL(target);
-    if (!ti) return false;
-
-    swatcher_target_inotify *ino_target = (swatcher_target_inotify *)ti->backend_data;
-    if (ino_target) {
-        inotify_rm_watch(ino->inotify_fd, ino_target->wd);
-        HASH_DEL(ino->wd_to_target, ino_target);
-        ino->watch_count--;
-        sw_free(ino_target);
-        ti->backend_data = NULL;
-    }
-
-    return true;
-}
-
-static bool inotify_add_target_recursive(swatcher *sw, swatcher_target *target, bool dont_add_self)
-{
-    return inotify_add_recursive_locked(sw, target, dont_add_self);
-}
-
-static void inotify_dispatch_event(swatcher *sw, swatcher_target *target,
-                                    swatcher_fs_event sw_event, const char *name,
-                                    bool is_dir, const char *old_path)
+static void uring_dispatch_event(swatcher *sw, swatcher_target *target,
+                                  swatcher_fs_event sw_event, const char *name,
+                                  bool is_dir, const char *old_path)
 {
     int coalesce_ms = sw->config->coalesce_ms;
 
@@ -711,7 +705,7 @@ static void inotify_dispatch_event(swatcher *sw, swatcher_target *target,
         else
             snprintf(full_path, SW_PATH_MAX, "%s/%s", target->path, name);
 
-        inotify_coalesce_add(sw, full_path, sw_event, target, is_dir, old_path);
+        uring_coalesce_add(sw, full_path, sw_event, target, is_dir, old_path);
     } else {
         if (sw_vcs_should_pause(sw->config, target->path))
             return;
@@ -721,233 +715,431 @@ static void inotify_dispatch_event(swatcher *sw, swatcher_target *target,
     }
 }
 
-static void *inotify_thread_func(void *arg)
+/* ========== Process inotify events from read buffer ========== */
+
+static void uring_process_inotify_events(swatcher *sw, int length)
 {
-    swatcher *sw = (swatcher *)arg;
-    swatcher_inotify *ino = INOTIFY_DATA(sw);
+    swatcher_uring *u = URING_DATA(sw);
     swatcher_internal *si = SW_INTERNAL(sw);
-    char buffer[BUF_LEN];
     int coalesce_ms = sw->config->coalesce_ms;
-    int poll_timeout = sw->config->poll_interval_ms;
+    int i = 0;
 
-    /* If coalescing, use shorter poll timeout for timely flushes */
-    if (coalesce_ms > 0 && poll_timeout > coalesce_ms)
-        poll_timeout = coalesce_ms;
+    sw_mutex_lock(si->mutex);
 
-    while (sw_atomic_load(&sw->running)) {
-        int poll_ret = poll(&ino->fds, 1, poll_timeout);
-        if (poll_ret < 0) {
-            if (errno == EINTR)
-                continue;
-            SWATCHER_LOG_DEFAULT_ERROR("poll failed: %s", strerror(errno));
-            break;
-        }
+    while (i < length) {
+        struct inotify_event *event = (struct inotify_event *)&u->read_buf[i];
 
-        sw_mutex_lock(si->mutex);
+        /* Handle IN_Q_OVERFLOW first (wd == -1) */
+        if (event->mask & IN_Q_OVERFLOW) {
+            SWATCHER_LOG_DEFAULT_WARNING("inotify queue overflow -- rescanning all watches (io_uring)");
+            uring_rescan_all(sw);
 
-        /* Expire unmatched MOVED_FROM entries → emit DELETE */
-        {
-            uint64_t now = sw_time_now_ms();
-            int expire_ms = coalesce_ms > 0 ? coalesce_ms : 100;
-            move_pending *mp, *mp_tmp;
-            HASH_ITER(hh, ino->pending_moves, mp, mp_tmp) {
-                if (now - mp->timestamp_ms >= (uint64_t)expire_ms) {
-                    /* Unmatched FROM → treat as DELETE */
-                    const char *name = strrchr(mp->path, '/');
-                    name = name ? name + 1 : mp->path;
-                    if (mp->target && mp->target->callback &&
-                        ((mp->target->events & SWATCHER_EVENT_DELETED) || (mp->target->events == SWATCHER_EVENT_ALL))) {
-                        inotify_dispatch_event(sw, mp->target, SWATCHER_EVENT_DELETED, name, mp->is_dir, NULL);
-                    }
-                    HASH_DEL(ino->pending_moves, mp);
-                    sw_free(mp);
-                }
-            }
-        }
-
-        /* Flush expired coalesce entries */
-        if (coalesce_ms > 0) {
-            inotify_coalesce_flush(sw, sw_time_now_ms(), coalesce_ms, false);
-        }
-
-        sw_mutex_unlock(si->mutex);
-
-        if (poll_ret == 0)
-            continue;
-
-        int length = read(ino->inotify_fd, buffer, BUF_LEN);
-        if (length < 0) {
-            if (errno == EINTR)
-                continue;
-            SWATCHER_LOG_ERROR(sw, "Error reading inotify FD: %s", strerror(errno));
-            break;
-        }
-
-        /* Lock mutex for the entire event parsing+dispatch loop */
-        sw_mutex_lock(si->mutex);
-
-        int i = 0;
-        while (i < length) {
-            struct inotify_event *event = (struct inotify_event *)&buffer[i];
-
-            /* Handle IN_Q_OVERFLOW first (wd == -1) */
-            if (event->mask & IN_Q_OVERFLOW) {
-                SWATCHER_LOG_DEFAULT_WARNING("inotify queue overflow — rescanning all watches");
-                inotify_rescan_all(sw);
-
-                /* Emit overflow to every active target's callback */
-                swatcher_target_inotify *ot, *ot_tmp;
-                HASH_ITER(hh, ino->wd_to_target, ot, ot_tmp) {
-                    if (ot->target->callback) {
-                        ot->target->callback(SWATCHER_EVENT_OVERFLOW, ot->target, NULL, NULL);
-                    }
-                }
-
-                /* Overflow recovery: re-scan and emit synthetic events */
-                if (sw->config->overflow_rescan) {
-                    swatcher_target_inotify *rt, *rt_tmp;
-                    HASH_ITER(hh, ino->wd_to_target, rt, rt_tmp) {
-                        if (rt->target->is_directory) {
-                            sw_rescan_entry *snap = sw_rescan_snapshot(rt->target->path, rt->target->is_recursive);
-                            /* TODO: store previous snapshot for proper diffing.
-                             * For now, emit all current files as CREATED to re-sync. */
-                            sw_rescan_diff(NULL, snap, rt->target);
-                            sw_rescan_free(snap);
-                        }
-                    }
-                }
-
-                i += sizeof(struct inotify_event) + event->len;
-                continue;
-            }
-
-            /* Handle IN_IGNORED (watch removed by kernel) — skip silently */
-            if (event->mask & IN_IGNORED) {
-                i += sizeof(struct inotify_event) + event->len;
-                continue;
-            }
-
-            swatcher_target_inotify *target_data = NULL;
-            HASH_FIND_INT(ino->wd_to_target, &event->wd, target_data);
-            if (!target_data) {
-                i += sizeof(struct inotify_event) + event->len;
-                continue;
-            }
-
-            swatcher_target *target = target_data->target;
-
-            /* Dynamic recursive watching: new directory appeared */
-            if ((event->mask & (IN_CREATE | IN_ISDIR)) == (IN_CREATE | IN_ISDIR) ||
-                (event->mask & (IN_MOVED_TO | IN_ISDIR)) == (IN_MOVED_TO | IN_ISDIR)) {
-                if (event->len > 0) {
-                    inotify_handle_dynamic_mkdir(sw, target, event->name);
+            swatcher_target_inotify *ot, *ot_tmp;
+            HASH_ITER(hh, u->wd_to_target, ot, ot_tmp) {
+                if (ot->target->callback) {
+                    ot->target->callback(SWATCHER_EVENT_OVERFLOW, ot->target, NULL, NULL);
                 }
             }
 
-            /* Dynamic recursive watching: directory removed */
-            if ((event->mask & (IN_DELETE | IN_ISDIR)) == (IN_DELETE | IN_ISDIR) ||
-                (event->mask & (IN_MOVED_FROM | IN_ISDIR)) == (IN_MOVED_FROM | IN_ISDIR)) {
-                if (event->len > 0) {
-                    inotify_handle_dynamic_rmdir(sw, target, event->name);
-                }
-            }
-
-            bool ev_is_dir = (event->mask & IN_ISDIR) != 0;
-
-            /* Move pairing: buffer FROM, match with TO via cookie */
-            if (event->mask & IN_MOVED_FROM) {
-                if (event->len > 0 && event->cookie != 0) {
-                    move_pending *mp = sw_malloc(sizeof(move_pending));
-                    if (mp) {
-                        mp->cookie = event->cookie;
-                        size_t plen = strlen(target->path);
-                        if (plen > 0 && target->path[plen - 1] == '/')
-                            snprintf(mp->path, SW_PATH_MAX, "%s%s", target->path, event->name);
-                        else
-                            snprintf(mp->path, SW_PATH_MAX, "%s/%s", target->path, event->name);
-                        mp->target = target;
-                        mp->is_dir = ev_is_dir;
-                        mp->timestamp_ms = sw_time_now_ms();
-                        HASH_ADD(hh, ino->pending_moves, cookie, sizeof(uint32_t), mp);
-                    }
-                }
-                i += sizeof(struct inotify_event) + event->len;
-                continue;
-            }
-
-            if (event->mask & IN_MOVED_TO) {
-                const char *name = event->len > 0 ? event->name : NULL;
-                const char *old_path = NULL;
-                move_pending *mp = NULL;
-
-                if (event->cookie != 0) {
-                    HASH_FIND(hh, ino->pending_moves, &event->cookie, sizeof(uint32_t), mp);
-                }
-                if (mp) {
-                    old_path = mp->path;
-                    HASH_DEL(ino->pending_moves, mp);
-                }
-
-                if (name && ((target->events & SWATCHER_EVENT_MOVED) || (target->events == SWATCHER_EVENT_ALL))) {
-                    swatcher_target_internal *ti = SW_TARGET_INTERNAL(target);
-                    bool pass = !ti->compiled_callback || sw_pattern_matched(ti->compiled_callback, name);
-                    if (pass)
-                        inotify_dispatch_event(sw, target, SWATCHER_EVENT_MOVED, name, ev_is_dir, old_path);
-                }
-
-                if (mp) sw_free(mp);
-                i += sizeof(struct inotify_event) + event->len;
-                continue;
-            }
-
-            swatcher_fs_event sw_event = inotify_to_swatcher_event(event->mask);
-
-            if (sw_event != SWATCHER_EVENT_NONE) {
-                if ((target->events & sw_event) || (target->events == SWATCHER_EVENT_ALL)) {
-                    const char *name = event->len > 0 ? event->name : NULL;
-
-                    if (SW_TARGET_INTERNAL(target)->compiled_callback && name) {
-                        if (sw_pattern_matched(SW_TARGET_INTERNAL(target)->compiled_callback, name)) {
-                            inotify_dispatch_event(sw, target, sw_event, name, ev_is_dir, NULL);
-                        }
-                    } else if (!SW_TARGET_INTERNAL(target)->compiled_callback) {
-                        inotify_dispatch_event(sw, target, sw_event, name, ev_is_dir, NULL);
+            if (sw->config->overflow_rescan) {
+                swatcher_target_inotify *rt, *rt_tmp;
+                HASH_ITER(hh, u->wd_to_target, rt, rt_tmp) {
+                    if (rt->target->is_directory) {
+                        sw_rescan_entry *snap = sw_rescan_snapshot(rt->target->path, rt->target->is_recursive);
+                        sw_rescan_diff(NULL, snap, rt->target);
+                        sw_rescan_free(snap);
                     }
                 }
             }
 
             i += sizeof(struct inotify_event) + event->len;
+            continue;
         }
 
+        /* Handle IN_IGNORED */
+        if (event->mask & IN_IGNORED) {
+            i += sizeof(struct inotify_event) + event->len;
+            continue;
+        }
+
+        swatcher_target_inotify *target_data = NULL;
+        HASH_FIND_INT(u->wd_to_target, &event->wd, target_data);
+        if (!target_data) {
+            i += sizeof(struct inotify_event) + event->len;
+            continue;
+        }
+
+        swatcher_target *target = target_data->target;
+
+        /* Dynamic recursive watching: new directory appeared */
+        if ((event->mask & (IN_CREATE | IN_ISDIR)) == (IN_CREATE | IN_ISDIR) ||
+            (event->mask & (IN_MOVED_TO | IN_ISDIR)) == (IN_MOVED_TO | IN_ISDIR)) {
+            if (event->len > 0) {
+                uring_handle_dynamic_mkdir(sw, target, event->name);
+            }
+        }
+
+        /* Dynamic recursive watching: directory removed */
+        if ((event->mask & (IN_DELETE | IN_ISDIR)) == (IN_DELETE | IN_ISDIR) ||
+            (event->mask & (IN_MOVED_FROM | IN_ISDIR)) == (IN_MOVED_FROM | IN_ISDIR)) {
+            if (event->len > 0) {
+                uring_handle_dynamic_rmdir(sw, target, event->name);
+            }
+        }
+
+        bool ev_is_dir = (event->mask & IN_ISDIR) != 0;
+
+        /* Move pairing */
+        if (event->mask & IN_MOVED_FROM) {
+            if (event->len > 0 && event->cookie != 0) {
+                move_pending *mp = sw_malloc(sizeof(move_pending));
+                if (mp) {
+                    mp->cookie = event->cookie;
+                    size_t plen = strlen(target->path);
+                    if (plen > 0 && target->path[plen - 1] == '/')
+                        snprintf(mp->path, SW_PATH_MAX, "%s%s", target->path, event->name);
+                    else
+                        snprintf(mp->path, SW_PATH_MAX, "%s/%s", target->path, event->name);
+                    mp->target = target;
+                    mp->is_dir = ev_is_dir;
+                    mp->timestamp_ms = sw_time_now_ms();
+                    HASH_ADD(hh, u->pending_moves, cookie, sizeof(uint32_t), mp);
+                }
+            }
+            i += sizeof(struct inotify_event) + event->len;
+            continue;
+        }
+
+        if (event->mask & IN_MOVED_TO) {
+            const char *name = event->len > 0 ? event->name : NULL;
+            const char *old_path = NULL;
+            move_pending *mp = NULL;
+
+            if (event->cookie != 0) {
+                HASH_FIND(hh, u->pending_moves, &event->cookie, sizeof(uint32_t), mp);
+            }
+            if (mp) {
+                old_path = mp->path;
+                HASH_DEL(u->pending_moves, mp);
+            }
+
+            if (name && ((target->events & SWATCHER_EVENT_MOVED) || (target->events == SWATCHER_EVENT_ALL))) {
+                swatcher_target_internal *ti = SW_TARGET_INTERNAL(target);
+                bool pass = !ti->compiled_callback || sw_pattern_matched(ti->compiled_callback, name);
+                if (pass)
+                    uring_dispatch_event(sw, target, SWATCHER_EVENT_MOVED, name, ev_is_dir, old_path);
+            }
+
+            if (mp) sw_free(mp);
+            i += sizeof(struct inotify_event) + event->len;
+            continue;
+        }
+
+        swatcher_fs_event sw_event = inotify_to_swatcher_event(event->mask);
+
+        if (sw_event != SWATCHER_EVENT_NONE) {
+            if ((target->events & sw_event) || (target->events == SWATCHER_EVENT_ALL)) {
+                const char *name = event->len > 0 ? event->name : NULL;
+
+                if (SW_TARGET_INTERNAL(target)->compiled_callback && name) {
+                    if (sw_pattern_matched(SW_TARGET_INTERNAL(target)->compiled_callback, name)) {
+                        uring_dispatch_event(sw, target, sw_event, name, ev_is_dir, NULL);
+                    }
+                } else if (!SW_TARGET_INTERNAL(target)->compiled_callback) {
+                    uring_dispatch_event(sw, target, sw_event, name, ev_is_dir, NULL);
+                }
+            }
+        }
+
+        i += sizeof(struct inotify_event) + event->len;
+    }
+
+    /* Flush expired coalesce entries */
+    if (coalesce_ms > 0) {
+        uring_coalesce_flush(sw, sw_time_now_ms(), coalesce_ms, false);
+    }
+
+    sw_mutex_unlock(si->mutex);
+}
+
+/* ========== Vtable functions ========== */
+
+static bool uring_init_backend(swatcher *sw)
+{
+    swatcher_uring *u = sw_malloc(sizeof(swatcher_uring));
+    if (!u) {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_uring");
+        return false;
+    }
+    memset(u, 0, sizeof(*u));
+    u->ring_fd = -1;
+    u->inotify_fd = -1;
+
+    /* Try to set up io_uring -- if this fails, the caller can fall back */
+    struct io_uring_params params;
+    memset(&params, 0, sizeof(params));
+
+    u->ring_fd = io_uring_setup(URING_ENTRIES, &params);
+    if (u->ring_fd < 0) {
+        SWATCHER_LOG_DEFAULT_INFO("io_uring_setup failed (errno %d: %s) -- kernel may be too old",
+                                   errno, strerror(errno));
+        sw_free(u);
+        return false;
+    }
+
+    /* Save ring offsets */
+    u->sq_off = params.sq_off;
+    u->cq_off = params.cq_off;
+    u->sq_entries = params.sq_entries;
+    u->cq_entries = params.cq_entries;
+
+    /* mmap the submission ring */
+    u->sq_ring_sz = params.sq_off.array + params.sq_entries * sizeof(uint32_t);
+    u->sq_ring = mmap(0, u->sq_ring_sz, PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_POPULATE, u->ring_fd, IORING_OFF_SQ_RING);
+    if (u->sq_ring == MAP_FAILED) {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to mmap SQ ring: %s", strerror(errno));
+        close(u->ring_fd);
+        sw_free(u);
+        return false;
+    }
+
+    /* mmap the completion ring */
+    u->cq_ring_sz = params.cq_off.cqes + params.cq_entries * sizeof(struct io_uring_cqe);
+    u->cq_ring = mmap(0, u->cq_ring_sz, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_POPULATE, u->ring_fd, IORING_OFF_CQ_RING);
+    if (u->cq_ring == MAP_FAILED) {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to mmap CQ ring: %s", strerror(errno));
+        munmap(u->sq_ring, u->sq_ring_sz);
+        close(u->ring_fd);
+        sw_free(u);
+        return false;
+    }
+
+    /* mmap the SQE array */
+    u->sqes_sz = params.sq_entries * sizeof(struct io_uring_sqe);
+    u->sqes = mmap(0, u->sqes_sz, PROT_READ | PROT_WRITE,
+                    MAP_SHARED | MAP_POPULATE, u->ring_fd, IORING_OFF_SQES);
+    if (u->sqes == MAP_FAILED) {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to mmap SQEs: %s", strerror(errno));
+        munmap(u->cq_ring, u->cq_ring_sz);
+        munmap(u->sq_ring, u->sq_ring_sz);
+        close(u->ring_fd);
+        sw_free(u);
+        return false;
+    }
+
+    /* Create inotify fd */
+    u->inotify_fd = inotify_init();
+    if (u->inotify_fd < 0) {
+        SWATCHER_LOG_DEFAULT_ERROR("Failed to initialize inotify for io_uring backend");
+        munmap(u->sqes, u->sqes_sz);
+        munmap(u->cq_ring, u->cq_ring_sz);
+        munmap(u->sq_ring, u->sq_ring_sz);
+        close(u->ring_fd);
+        sw_free(u);
+        return false;
+    }
+
+    u->wd_to_target = NULL;
+    u->watch_count = 0;
+    u->max_watches = uring_get_max_watches();
+    u->pending_events = NULL;
+    u->pending_moves = NULL;
+
+    SW_INTERNAL(sw)->backend_data = u;
+    SWATCHER_LOG_DEFAULT_INFO("io_uring backend initialized (sq=%u, cq=%u)",
+                               u->sq_entries, u->cq_entries);
+    return true;
+}
+
+static void uring_destroy(swatcher *sw)
+{
+    swatcher_uring *u = URING_DATA(sw);
+    if (!u) return;
+
+    /* Flush and free pending coalesce events */
+    coalesce_entry *ce, *ce_tmp;
+    HASH_ITER(hh, u->pending_events, ce, ce_tmp) {
+        HASH_DEL(u->pending_events, ce);
+        sw_free(ce);
+    }
+
+    /* Free pending move entries */
+    move_pending *mp, *mp_tmp;
+    HASH_ITER(hh, u->pending_moves, mp, mp_tmp) {
+        HASH_DEL(u->pending_moves, mp);
+        sw_free(mp);
+    }
+
+    /* Remove all inotify watches */
+    swatcher_target_inotify *current, *tmp;
+    HASH_ITER(hh, u->wd_to_target, current, tmp) {
+        inotify_rm_watch(u->inotify_fd, current->wd);
+        HASH_DEL(u->wd_to_target, current);
+        sw_free(current);
+    }
+
+    if (u->inotify_fd >= 0)
+        close(u->inotify_fd);
+
+    /* Unmap rings */
+    if (u->sqes && u->sqes != MAP_FAILED)
+        munmap(u->sqes, u->sqes_sz);
+    if (u->cq_ring && u->cq_ring != MAP_FAILED)
+        munmap(u->cq_ring, u->cq_ring_sz);
+    if (u->sq_ring && u->sq_ring != MAP_FAILED)
+        munmap(u->sq_ring, u->sq_ring_sz);
+
+    if (u->ring_fd >= 0)
+        close(u->ring_fd);
+
+    sw_free(u);
+    SW_INTERNAL(sw)->backend_data = NULL;
+}
+
+static bool uring_add_target(swatcher *sw, swatcher_target *target)
+{
+    return uring_add_single(sw, target);
+}
+
+static bool uring_remove_target(swatcher *sw, swatcher_target *target)
+{
+    swatcher_uring *u = URING_DATA(sw);
+    swatcher_target_internal *ti = SW_TARGET_INTERNAL(target);
+    if (!ti) return false;
+
+    swatcher_target_inotify *ino_target = (swatcher_target_inotify *)ti->backend_data;
+    if (ino_target) {
+        inotify_rm_watch(u->inotify_fd, ino_target->wd);
+        HASH_DEL(u->wd_to_target, ino_target);
+        u->watch_count--;
+        sw_free(ino_target);
+        ti->backend_data = NULL;
+    }
+
+    return true;
+}
+
+static bool uring_add_target_recursive(swatcher *sw, swatcher_target *target, bool dont_add_self)
+{
+    return uring_add_recursive_locked(sw, target, dont_add_self);
+}
+
+static void *uring_thread_func(void *arg)
+{
+    swatcher *sw = (swatcher *)arg;
+    swatcher_uring *u = URING_DATA(sw);
+    swatcher_internal *si = SW_INTERNAL(sw);
+    int coalesce_ms = sw->config->coalesce_ms;
+
+    bool read_pending = false;
+
+    while (sw_atomic_load(&sw->running)) {
+        /* Submit a read on the inotify fd if none pending */
+        if (!read_pending) {
+            if (!uring_submit_read(u)) {
+                SWATCHER_LOG_DEFAULT_ERROR("io_uring: failed to prepare SQE for read");
+                sw_sleep_ms(10);
+                continue;
+            }
+            /* Submit the SQE (no wait) */
+            int ret = io_uring_enter(u->ring_fd, 1, 0, 0, NULL);
+            if (ret < 0 && errno != EINTR) {
+                SWATCHER_LOG_DEFAULT_ERROR("io_uring_enter submit failed: %s", strerror(errno));
+                break;
+            }
+            read_pending = true;
+        }
+
+        /* Poll the ring fd with a short timeout so we can check sw->running */
+        struct pollfd pfd = { .fd = u->ring_fd, .events = POLLIN };
+        int poll_ret = poll(&pfd, 1, 100);
+        if (poll_ret < 0) {
+            if (errno == EINTR) continue;
+            SWATCHER_LOG_DEFAULT_ERROR("poll on ring_fd failed: %s", strerror(errno));
+            break;
+        }
+        if (poll_ret == 0)
+            goto flush_coalesce; /* timeout — check running flag and flush */
+
+        /* Process completions */
+        uint32_t cq_head = io_uring_smp_load_acquire(uring_cq_head(u));
+        uint32_t cq_tail = io_uring_smp_load_acquire(uring_cq_tail(u));
+
+        while (cq_head != cq_tail) {
+            struct io_uring_cqe *cqe = uring_cqe_at(u, cq_head);
+
+            if (cqe->user_data == 1) {
+                /* inotify read completion */
+                read_pending = false;
+                if (cqe->res > 0) {
+                    uring_process_inotify_events(sw, cqe->res);
+                } else if (cqe->res < 0 && cqe->res != -EINTR) {
+                    SWATCHER_LOG_DEFAULT_ERROR("io_uring read completion error: %s",
+                                                strerror(-cqe->res));
+                }
+            }
+
+            cq_head++;
+        }
+
+        /* Advance the CQ head */
+        io_uring_smp_store_release(uring_cq_head(u), cq_head);
+
+flush_coalesce:
+        /* Expire unmatched MOVED_FROM entries and flush coalesce */
+        sw_mutex_lock(si->mutex);
+        {
+            uint64_t now = sw_time_now_ms();
+            int expire_ms = coalesce_ms > 0 ? coalesce_ms : 100;
+            move_pending *mp, *mp_tmp;
+            HASH_ITER(hh, u->pending_moves, mp, mp_tmp) {
+                if (now - mp->timestamp_ms >= (uint64_t)expire_ms) {
+                    const char *name = strrchr(mp->path, '/');
+                    name = name ? name + 1 : mp->path;
+                    if (mp->target && mp->target->callback &&
+                        ((mp->target->events & SWATCHER_EVENT_DELETED) || (mp->target->events == SWATCHER_EVENT_ALL))) {
+                        uring_dispatch_event(sw, mp->target, SWATCHER_EVENT_DELETED, name, mp->is_dir, NULL);
+                    }
+                    HASH_DEL(u->pending_moves, mp);
+                    sw_free(mp);
+                }
+            }
+
+            if (coalesce_ms > 0) {
+                uring_coalesce_flush(sw, sw_time_now_ms(), coalesce_ms, false);
+            }
+        }
         sw_mutex_unlock(si->mutex);
     }
 
     /* Flush remaining coalesced events on shutdown */
     if (coalesce_ms > 0) {
         sw_mutex_lock(si->mutex);
-        inotify_coalesce_flush(sw, 0, 0, true);
+        uring_coalesce_flush(sw, 0, 0, true);
         sw_mutex_unlock(si->mutex);
     }
 
-    SWATCHER_LOG_INFO(sw, "Watcher thread exiting...");
+    SWATCHER_LOG_INFO(sw, "io_uring watcher thread exiting...");
     return NULL;
 }
 
 /* ========== Backend definition ========== */
 
-static const swatcher_backend inotify_backend = {
-    .name = "inotify",
-    .init = inotify_init_backend,
-    .destroy = inotify_destroy,
-    .add_target = inotify_add_target,
-    .remove_target = inotify_remove_target,
-    .add_target_recursive = inotify_add_target_recursive,
-    .thread_func = inotify_thread_func,
+static const swatcher_backend uring_backend = {
+    .name = "io_uring",
+    .init = uring_init_backend,
+    .destroy = uring_destroy,
+    .add_target = uring_add_target,
+    .remove_target = uring_remove_target,
+    .add_target_recursive = uring_add_target_recursive,
+    .thread_func = uring_thread_func,
 };
 
-const swatcher_backend *swatcher_backend_inotify(void)
+const swatcher_backend *swatcher_backend_uring(void)
 {
-    return &inotify_backend;
+    return &uring_backend;
 }
 
 #endif /* __linux__ */

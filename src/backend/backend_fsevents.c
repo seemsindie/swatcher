@@ -3,6 +3,7 @@
 #include "swatcher.h"
 #include "../internal/internal.h"
 #include "../core/pattern.h"
+#include "../core/vcs.h"
 
 #include <CoreServices/CoreServices.h>
 #include <errno.h>
@@ -23,6 +24,7 @@ typedef struct coalesce_entry {
     swatcher_fs_event event;
     swatcher_target *target;
     uint64_t timestamp_ms;
+    bool is_dir;
     UT_hash_handle hh;
 } coalesce_entry;
 
@@ -65,11 +67,16 @@ static fsevents_target *find_target_for_path(swatcher_fsevents *fse, const char 
 
 static void fsevents_coalesce_dispatch(swatcher *sw, coalesce_entry *ce)
 {
-    (void)sw;
     if (ce->target && ce->target->callback) {
+        if (sw_vcs_should_pause(sw->config, ce->target->path))
+            return;
         const char *name = strrchr(ce->path, '/');
         name = name ? name + 1 : ce->path;
-        ce->target->callback(ce->event, ce->target, name, NULL);
+        swatcher_event_info info = {
+            .old_path = NULL,
+            .is_dir = ce->is_dir,
+        };
+        ce->target->callback(ce->event, ce->target, name, &info);
         ce->target->last_event_time = time(NULL);
     }
 }
@@ -83,13 +90,14 @@ static void fsevents_coalesce_flush(swatcher *sw, uint64_t now_ms, int coalesce_
         if (flush_all || (now_ms - current->timestamp_ms >= (uint64_t)coalesce_ms)) {
             fsevents_coalesce_dispatch(sw, current);
             HASH_DEL(fse->pending_events, current);
-            free(current);
+            sw_free(current);
         }
     }
 }
 
 static void fsevents_coalesce_add(swatcher *sw, const char *full_path,
-                                   swatcher_fs_event event, swatcher_target *target)
+                                   swatcher_fs_event event, swatcher_target *target,
+                                   bool is_dir)
 {
     swatcher_fsevents *fse = FSEVENTS_DATA(sw);
     coalesce_entry *existing = NULL;
@@ -99,7 +107,7 @@ static void fsevents_coalesce_add(swatcher *sw, const char *full_path,
     if (existing) {
         if (existing->event == SWATCHER_EVENT_CREATED && event == SWATCHER_EVENT_DELETED) {
             HASH_DEL(fse->pending_events, existing);
-            free(existing);
+            sw_free(existing);
             return;
         } else if (existing->event == SWATCHER_EVENT_CREATED && event == SWATCHER_EVENT_MODIFIED) {
             existing->timestamp_ms = sw_time_now_ms();
@@ -115,13 +123,14 @@ static void fsevents_coalesce_add(swatcher *sw, const char *full_path,
         existing->event = event;
         existing->timestamp_ms = sw_time_now_ms();
     } else {
-        coalesce_entry *ce = malloc(sizeof(coalesce_entry));
+        coalesce_entry *ce = sw_malloc(sizeof(coalesce_entry));
         if (!ce) return;
         strncpy(ce->path, full_path, SW_PATH_MAX - 1);
         ce->path[SW_PATH_MAX - 1] = '\0';
         ce->event = event;
         ce->target = target;
         ce->timestamp_ms = sw_time_now_ms();
+        ce->is_dir = is_dir;
         HASH_ADD_STR(fse->pending_events, path, ce);
     }
 }
@@ -130,15 +139,18 @@ static void fsevents_coalesce_add(swatcher *sw, const char *full_path,
 
 static void fsevents_dispatch_event(swatcher *sw, swatcher_target *target,
                                      swatcher_fs_event sw_event, const char *name,
-                                     const char *full_path)
+                                     const char *full_path, bool is_dir)
 {
     int coalesce_ms = sw->config->coalesce_ms;
 
     if (coalesce_ms > 0 && full_path) {
-        fsevents_coalesce_add(sw, full_path, sw_event, target);
+        fsevents_coalesce_add(sw, full_path, sw_event, target, is_dir);
     } else {
         if (target->callback) {
-            target->callback(sw_event, target, name, NULL);
+            if (sw_vcs_should_pause(sw->config, target->path))
+                return;
+            swatcher_event_info info = { .old_path = NULL, .is_dir = is_dir };
+            target->callback(sw_event, target, name, &info);
             target->last_event_time = time(NULL);
         }
     }
@@ -204,9 +216,11 @@ static void fsevents_stream_callback(
         if (!ft->is_file_target && strcmp(path, ft->path) == 0)
             continue;
 
+        /* Determine if item is a directory (used for filtering and event info) */
+        bool is_dir_event = (flags & kFSEventStreamEventFlagItemIsDir) != 0;
+
         /* Watch option filtering */
         if (target->watch_options != SWATCHER_WATCH_ALL) {
-            bool is_dir_event = (flags & kFSEventStreamEventFlagItemIsDir) != 0;
             bool is_file_event = (flags & kFSEventStreamEventFlagItemIsFile) != 0;
             bool is_symlink_event = (flags & kFSEventStreamEventFlagItemIsSymlink) != 0;
 
@@ -256,7 +270,7 @@ static void fsevents_stream_callback(
             if (!(target->events & sw_event) && target->events != SWATCHER_EVENT_ALL)
                 continue;
 
-            fsevents_dispatch_event(sw, target, sw_event, name, path);
+            fsevents_dispatch_event(sw, target, sw_event, name, path, is_dir_event);
             already_dispatched |= sw_event;
             any_dispatched = true;
         }
@@ -271,7 +285,7 @@ static void fsevents_stream_callback(
 
 static bool fsevents_init(swatcher *sw)
 {
-    swatcher_fsevents *fse = malloc(sizeof(swatcher_fsevents));
+    swatcher_fsevents *fse = sw_malloc(sizeof(swatcher_fsevents));
     if (!fse) {
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_fsevents");
         return false;
@@ -296,17 +310,17 @@ static void fsevents_destroy(swatcher *sw)
     coalesce_entry *ce, *ce_tmp;
     HASH_ITER(hh, fse->pending_events, ce, ce_tmp) {
         HASH_DEL(fse->pending_events, ce);
-        free(ce);
+        sw_free(ce);
     }
 
     /* Free target mappings */
     fsevents_target *ft, *ft_tmp;
     HASH_ITER(hh, fse->targets, ft, ft_tmp) {
         HASH_DEL(fse->targets, ft);
-        free(ft);
+        sw_free(ft);
     }
 
-    free(fse);
+    sw_free(fse);
     SW_INTERNAL(sw)->backend_data = NULL;
 }
 
@@ -319,7 +333,7 @@ static bool fsevents_add_single(swatcher *sw, swatcher_target *target)
         return false;
     }
 
-    fsevents_target *ft = malloc(sizeof(fsevents_target));
+    fsevents_target *ft = sw_malloc(sizeof(fsevents_target));
     if (!ft) {
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate fsevents_target");
         return false;
@@ -353,7 +367,7 @@ static bool fsevents_add_single(swatcher *sw, swatcher_target *target)
             SWATCHER_LOG_DEFAULT_ERROR("Failed to create target internal");
             HASH_DEL(fse->targets, ft);
             fse->target_count--;
-            free(ft);
+            sw_free(ft);
             return false;
         }
     }
@@ -379,7 +393,7 @@ static bool fsevents_remove_target(swatcher *sw, swatcher_target *target)
     if (ft) {
         HASH_DEL(fse->targets, ft);
         fse->target_count--;
-        free(ft);
+        sw_free(ft);
         ti->backend_data = NULL;
     }
 

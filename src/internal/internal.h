@@ -2,6 +2,12 @@
 #define SWATCHER_INTERNAL_H
 
 #include "swatcher_types.h"
+#include "../internal/alloc.h"
+
+/* Override uthash to use the custom allocator */
+#define uthash_malloc(sz)      sw_malloc(sz)
+#define uthash_free(ptr, sz)   do { (void)(sz); sw_free(ptr); } while(0)
+
 #include "uthash.h"
 #include "../platform/platform.h"
 #include "../backend/backend.h"

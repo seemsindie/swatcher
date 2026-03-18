@@ -97,14 +97,34 @@ typedef enum swatcher_error {
     SWATCHER_ERR_UNKNOWN            /**< Unknown error. */
 } swatcher_error;
 
+/** @brief Custom allocator. All fields may be NULL to use stdlib defaults. */
+typedef struct swatcher_allocator {
+    void *(*malloc)(size_t size, void *ctx);
+    void *(*realloc)(void *ptr, size_t size, void *ctx);
+    void  (*free)(void *ptr, void *ctx);
+    void *ctx;
+} swatcher_allocator;
+
 typedef struct swatcher_target swatcher_target;
+
+/**
+ * @brief Extended event information passed via additional_data.
+ *
+ * For SWATCHER_EVENT_MOVED, old_path contains the previous path (if known).
+ * is_dir is true when the changed entry is a directory.
+ * Users who ignore additional_data are unaffected (backward compatible).
+ */
+typedef struct swatcher_event_info {
+    const char *old_path; /**< Previous path on rename/move, or NULL if unknown. */
+    bool is_dir;          /**< true if the changed entry is a directory. */
+} swatcher_event_info;
 
 /**
  * @brief Callback invoked when a file system event occurs.
  * @param event          The event type (bitmask).
  * @param target         The target that triggered the event.
  * @param event_name     The file/directory name that changed (may be NULL).
- * @param additional_data  User-provided data from swatcher_target_desc.user_data.
+ * @param additional_data  Pointer to swatcher_event_info (may be NULL for overflow).
  */
 typedef void (*swatcher_callback_fn)(swatcher_fs_event event, swatcher_target *target,
                                      const char *event_name, void *additional_data);
@@ -156,9 +176,12 @@ typedef struct swatcher_target_desc {
  * Zero-initialize for defaults, or set fields as needed.
  */
 typedef struct swatcher_config {
-    int poll_interval_ms;  /**< Poll interval in milliseconds (poll backend). */
-    bool enable_logging;   /**< Enable internal logging to stderr. */
-    int coalesce_ms;       /**< Event coalescing window in ms (0 = disabled). */
+    int poll_interval_ms;          /**< Poll interval in milliseconds (poll backend). */
+    bool enable_logging;           /**< Enable internal logging to stderr. */
+    int coalesce_ms;               /**< Event coalescing window in ms (0 = disabled). */
+    swatcher_allocator *allocator; /**< Custom allocator, or NULL for stdlib. */
+    bool overflow_rescan;          /**< Re-scan dirs on overflow (default: false). */
+    bool vcs_aware;                /**< Pause events during VCS operations (default: false). */
 } swatcher_config;
 
 /** @brief Opaque watcher handle. */

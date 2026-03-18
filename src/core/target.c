@@ -10,7 +10,7 @@ SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
         return NULL;
     }
 
-    swatcher_target *target = malloc(sizeof(swatcher_target));
+    swatcher_target *target = sw_malloc(sizeof(swatcher_target));
     if (!target) {
         sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_target");
@@ -21,7 +21,7 @@ SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
     if (!sw_path_normalize(desc->path, normalized_path, SW_PATH_MAX, desc->follow_symlinks)) {
         sw_set_error(SWATCHER_ERR_INVALID_PATH);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to normalize path: %s", desc->path);
-        free(target);
+        sw_free(target);
         return NULL;
     }
 
@@ -29,7 +29,7 @@ SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
     if (!sw_stat(normalized_path, &info, desc->follow_symlinks)) {
         sw_set_error(SWATCHER_ERR_PATH_NOT_FOUND);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to stat path: %s", normalized_path);
-        free(target);
+        sw_free(target);
         return NULL;
     }
 
@@ -41,7 +41,7 @@ SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
     if (!target->path) {
         sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate path (string)");
-        free(target);
+        sw_free(target);
         return NULL;
     }
 
@@ -68,8 +68,8 @@ SWATCHER_API swatcher_target *swatcher_target_create(swatcher_target_desc *desc)
     if (!sw_target_internal_create(target)) {
         sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to create target internal for %s", target->path);
-        free(target->path);
-        free(target);
+        sw_free(target->path);
+        sw_free(target);
         return NULL;
     }
 
@@ -81,8 +81,8 @@ SWATCHER_API void swatcher_target_destroy(swatcher_target *target)
     if (!target) return;
     if (target->_internal)
         sw_target_internal_destroy(SW_TARGET_INTERNAL(target));
-    free(target->path);
-    free(target);
+    sw_free(target->path);
+    sw_free(target);
 }
 
 SWATCHER_API bool swatcher_is_watched(swatcher *sw, const char *path)
@@ -92,7 +92,7 @@ SWATCHER_API bool swatcher_is_watched(swatcher *sw, const char *path)
 
 swatcher_target_internal *sw_target_internal_create(swatcher_target *target)
 {
-    swatcher_target_internal *ti = malloc(sizeof(swatcher_target_internal));
+    swatcher_target_internal *ti = sw_malloc(sizeof(swatcher_target_internal));
     if (!ti) return NULL;
     ti->target = target;
     ti->path = target->path;
@@ -113,5 +113,5 @@ void sw_target_internal_destroy(swatcher_target_internal *ti)
     sw_patterns_free(ti->compiled_ignore);
     if (ti->target)
         ti->target->_internal = NULL;
-    free(ti);
+    sw_free(ti);
 }

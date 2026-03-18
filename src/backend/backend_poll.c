@@ -2,6 +2,7 @@
 #include "../internal/internal.h"
 #include "../core/pattern.h"
 #include "../core/error.h"
+#include "../core/vcs.h"
 
 /* ========== Local types ========== */
 
@@ -14,9 +15,17 @@ typedef struct poll_file_snapshot {
     UT_hash_handle hh;
 } poll_file_snapshot;
 
+typedef struct poll_dir_mtime {
+    char *path;           /* hash key */
+    uint64_t mtime;
+    uint64_t cached_at;   /* monotonic ms when mtime was cached */
+    UT_hash_handle hh;
+} poll_dir_mtime;
+
 typedef struct swatcher_target_poll {
     swatcher_target *target;
     poll_file_snapshot *snapshots;   /* uthash head */
+    poll_dir_mtime *dir_mtimes;     /* uthash: dir path -> last known mtime */
     UT_hash_handle hh;
 } swatcher_target_poll;
 
@@ -38,11 +47,11 @@ static poll_file_snapshot *snapshot_find(swatcher_target_poll *tp, const char *p
 static poll_file_snapshot *snapshot_add(swatcher_target_poll *tp, const char *path,
                                         uint64_t mtime, uint64_t size)
 {
-    poll_file_snapshot *snap = malloc(sizeof(poll_file_snapshot));
+    poll_file_snapshot *snap = sw_malloc(sizeof(poll_file_snapshot));
     if (!snap) return NULL;
     snap->path = sw_strdup(path);
     if (!snap->path) {
-        free(snap);
+        sw_free(snap);
         return NULL;
     }
     snap->mtime = mtime;
@@ -54,8 +63,8 @@ static poll_file_snapshot *snapshot_add(swatcher_target_poll *tp, const char *pa
 
 static void snapshot_free(poll_file_snapshot *snap)
 {
-    free(snap->path);
-    free(snap);
+    sw_free(snap->path);
+    sw_free(snap);
 }
 
 static void snapshots_clear(swatcher_target_poll *tp)
@@ -65,13 +74,24 @@ static void snapshots_clear(swatcher_target_poll *tp)
         HASH_DEL(tp->snapshots, current);
         snapshot_free(current);
     }
+
+    poll_dir_mtime *dm, *dm_tmp;
+    HASH_ITER(hh, tp->dir_mtimes, dm, dm_tmp) {
+        HASH_DEL(tp->dir_mtimes, dm);
+        sw_free(dm->path);
+        sw_free(dm);
+    }
 }
 
 /* ========== Directory walking ========== */
 
-static void emit_event(swatcher_target *target, swatcher_fs_event event, const char *path)
+static void emit_event(swatcher *sw, swatcher_target *target, swatcher_fs_event event,
+                       const char *path, bool is_dir, const char *old_path)
 {
     if (!(target->events & event) && target->events != SWATCHER_EVENT_ALL)
+        return;
+
+    if (sw_vcs_should_pause(sw->config, target->path))
         return;
 
     /* Extract filename from path for pattern matching */
@@ -85,73 +105,164 @@ static void emit_event(swatcher_target *target, swatcher_fs_event event, const c
             return;
     }
 
-    target->callback(event, target, path, NULL);
+    swatcher_event_info info = { .old_path = old_path, .is_dir = is_dir };
+    target->callback(event, target, path, &info);
     target->last_event_time = time(NULL);
 }
 
-static void scan_path(swatcher_target_poll *tp, const char *dir_path, bool recursive)
+static void scan_path(swatcher *sw, swatcher_target_poll *tp, const char *dir_path, bool recursive)
 {
     swatcher_target *target = tp->target;
     swatcher_target_internal *ti = SW_TARGET_INTERNAL(target);
 
-    sw_dir *dir = sw_dir_open(dir_path);
-    if (!dir) return;
-
-    sw_dir_entry entry;
-    char child_path[SW_PATH_MAX];
-    char sep = sw_path_separator();
-
-    while (sw_dir_next(dir, &entry)) {
-        if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0)
-            continue;
-
-        /* Check ignore patterns */
-        if (ti && ti->compiled_ignore && sw_pattern_matched(ti->compiled_ignore, entry.name))
-            continue;
-
-        /* Build full path */
-        size_t dlen = strlen(dir_path);
-        if (dlen > 0 && dir_path[dlen - 1] == sep)
-            snprintf(child_path, SW_PATH_MAX, "%s%s", dir_path, entry.name);
-        else
-            snprintf(child_path, SW_PATH_MAX, "%s%c%s", dir_path, sep, entry.name);
-
-        if (entry.is_dir && recursive) {
-            scan_path(tp, child_path, true);
-            continue;
-        }
-
-        if (entry.is_dir)
-            continue;
-
-        /* Check watch patterns (files only) */
-        if (ti && ti->compiled_watch && !sw_pattern_matched(ti->compiled_watch, entry.name))
-            continue;
-
-        /* Stat the file */
-        sw_file_info info;
-        if (!sw_stat(child_path, &info, target->follow_symlinks))
-            continue;
-
-        poll_file_snapshot *snap = snapshot_find(tp, child_path);
-        if (!snap) {
-            /* New file — mark as new, events emitted later by poll_scan_target */
-            poll_file_snapshot *ns = snapshot_add(tp, child_path, info.mtime, info.size);
-            if (ns) ns->is_new = true;
+    /* Check directory mtime to decide whether to list directory contents.
+     * Directory mtime changes when direct children are added or removed,
+     * but NOT when file contents are modified. So when mtime is unchanged
+     * we can skip readdir (no adds/removes), but we must still re-stat
+     * known files to detect content modifications.
+     *
+     * On first encounter (no cache entry), we always do a full scan and
+     * store mtime as 0 so the NEXT check also forces a full scan. This
+     * avoids missing changes that occur within the same second as the
+     * cache was populated (filesystems with second-resolution mtimes). */
+    bool dir_changed = true;
+    sw_file_info dir_info;
+    if (sw_stat(dir_path, &dir_info, target->follow_symlinks)) {
+        poll_dir_mtime *cached = NULL;
+        HASH_FIND_STR(tp->dir_mtimes, dir_path, cached);
+        if (cached) {
+            uint64_t now = sw_time_now_ms();
+            /* Only trust the cache if the mtime matches AND enough time
+             * has elapsed since caching.  This handles filesystems with
+             * second-resolution mtimes where changes within the same
+             * calendar second would otherwise be invisible. */
+            if (cached->mtime == dir_info.mtime &&
+                (now - cached->cached_at) > 1500) {
+                dir_changed = false;
+            } else if (cached->mtime != dir_info.mtime) {
+                cached->mtime = dir_info.mtime;
+                cached->cached_at = now;
+            }
         } else {
-            snap->seen = true;
-            if (snap->mtime != info.mtime || snap->size != info.size) {
-                snap->mtime = info.mtime;
-                snap->size = info.size;
-                emit_event(target, SWATCHER_EVENT_MODIFIED, child_path);
+            cached = sw_malloc(sizeof(poll_dir_mtime));
+            if (cached) {
+                cached->path = sw_strdup(dir_path);
+                if (!cached->path) {
+                    sw_free(cached);
+                } else {
+                    cached->mtime = dir_info.mtime;
+                    cached->cached_at = sw_time_now_ms();
+                    HASH_ADD_STR(tp->dir_mtimes, path, cached);
+                }
             }
         }
     }
 
-    sw_dir_close(dir);
+    if (dir_changed) {
+        /* Directory changed — full scan: list contents to find new/removed files */
+        sw_dir *dir = sw_dir_open(dir_path);
+        if (!dir) return;
+
+        sw_dir_entry entry;
+        char child_path[SW_PATH_MAX];
+        char sep = sw_path_separator();
+
+        while (sw_dir_next(dir, &entry)) {
+            if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0)
+                continue;
+
+            /* Check ignore patterns */
+            if (ti && ti->compiled_ignore && sw_pattern_matched(ti->compiled_ignore, entry.name))
+                continue;
+
+            /* Build full path */
+            size_t dlen = strlen(dir_path);
+            if (dlen > 0 && dir_path[dlen - 1] == sep)
+                snprintf(child_path, SW_PATH_MAX, "%s%s", dir_path, entry.name);
+            else
+                snprintf(child_path, SW_PATH_MAX, "%s%c%s", dir_path, sep, entry.name);
+
+            if (entry.is_dir && recursive) {
+                scan_path(sw, tp, child_path, true);
+                continue;
+            }
+
+            if (entry.is_dir)
+                continue;
+
+            /* Check watch patterns (files only) */
+            if (ti && ti->compiled_watch && !sw_pattern_matched(ti->compiled_watch, entry.name))
+                continue;
+
+            /* Stat the file */
+            sw_file_info info;
+            if (!sw_stat(child_path, &info, target->follow_symlinks))
+                continue;
+
+            poll_file_snapshot *snap = snapshot_find(tp, child_path);
+            if (!snap) {
+                /* New file — mark as new, events emitted later by poll_scan_target */
+                poll_file_snapshot *ns = snapshot_add(tp, child_path, info.mtime, info.size);
+                if (ns) ns->is_new = true;
+            } else {
+                snap->seen = true;
+                if (snap->mtime != info.mtime || snap->size != info.size) {
+                    snap->mtime = info.mtime;
+                    snap->size = info.size;
+                    emit_event(sw, target, SWATCHER_EVENT_MODIFIED, child_path, false, NULL);
+                }
+            }
+        }
+
+        sw_dir_close(dir);
+    } else {
+        /* Directory unchanged — no files added/removed.
+         * Re-stat known snapshots in this directory to detect modifications.
+         * Also recurse into known subdirectories if recursive. */
+        size_t dir_len = strlen(dir_path);
+        char sep = sw_path_separator();
+
+        poll_file_snapshot *snap, *tmp;
+        HASH_ITER(hh, tp->snapshots, snap, tmp) {
+            /* Check if this snapshot belongs to this directory (direct child) */
+            if (strncmp(snap->path, dir_path, dir_len) != 0)
+                continue;
+            const char *rest = snap->path + dir_len;
+            if (*rest == sep) rest++;
+            if (*rest == '\0' || strchr(rest, sep) != NULL)
+                continue;  /* Not a direct child of this directory */
+
+            sw_file_info info;
+            if (sw_stat(snap->path, &info, target->follow_symlinks)) {
+                snap->seen = true;
+                if (snap->mtime != info.mtime || snap->size != info.size) {
+                    snap->mtime = info.mtime;
+                    snap->size = info.size;
+                    emit_event(sw, target, SWATCHER_EVENT_MODIFIED, snap->path, false, NULL);
+                }
+            }
+            /* If stat fails, leave seen=false so poll_scan_target handles deletion */
+        }
+
+        /* Recurse into known subdirectories via the dir_mtime cache */
+        if (recursive) {
+            poll_dir_mtime *dm, *dm_tmp;
+            HASH_ITER(hh, tp->dir_mtimes, dm, dm_tmp) {
+                if (dm->path == NULL)
+                    continue;
+                if (strncmp(dm->path, dir_path, dir_len) != 0)
+                    continue;
+                const char *rest = dm->path + dir_len;
+                if (*rest == sep) rest++;
+                if (*rest == '\0' || strchr(rest, sep) != NULL)
+                    continue;  /* Not a direct child subdirectory */
+                scan_path(sw, tp, dm->path, true);
+            }
+        }
+    }
 }
 
-static void poll_scan_target(swatcher_target_poll *tp)
+static void poll_scan_target(swatcher *sw, swatcher_target_poll *tp)
 {
     swatcher_target *target = tp->target;
 
@@ -169,19 +280,19 @@ static void poll_scan_target(swatcher_target_poll *tp)
             poll_file_snapshot *s = snapshot_find(tp, target->path);
             if (!s) {
                 snapshot_add(tp, target->path, info.mtime, info.size);
-                emit_event(target, SWATCHER_EVENT_CREATED, target->path);
+                emit_event(sw, target, SWATCHER_EVENT_CREATED, target->path, false, NULL);
             } else {
                 s->seen = true;
                 if (s->mtime != info.mtime || s->size != info.size) {
                     s->mtime = info.mtime;
                     s->size = info.size;
-                    emit_event(target, SWATCHER_EVENT_MODIFIED, target->path);
+                    emit_event(sw, target, SWATCHER_EVENT_MODIFIED, target->path, false, NULL);
                 }
             }
         } else {
             poll_file_snapshot *s = snapshot_find(tp, target->path);
             if (s) {
-                emit_event(target, SWATCHER_EVENT_DELETED, target->path);
+                emit_event(sw, target, SWATCHER_EVENT_DELETED, target->path, false, NULL);
                 HASH_DEL(tp->snapshots, s);
                 snapshot_free(s);
             }
@@ -190,7 +301,7 @@ static void poll_scan_target(swatcher_target_poll *tp)
     }
 
     /* Directory target — scan_path marks existing as seen, adds new with is_new=true */
-    scan_path(tp, target->path, target->is_recursive);
+    scan_path(sw, tp, target->path, target->is_recursive);
 
     /* Collect deleted entries (unseen) into a temporary list */
     int num_deleted = 0;
@@ -212,14 +323,14 @@ static void poll_scan_target(swatcher_target_poll *tp)
                 HASH_ITER(hh, tp->snapshots, candidate, ctmp) {
                     if (candidate->is_new && candidate->size == snap->size) {
                         /* Match found — this is a move/rename */
-                        emit_event(target, SWATCHER_EVENT_MOVED, candidate->path);
+                        emit_event(sw, target, SWATCHER_EVENT_MOVED, candidate->path, false, snap->path);
                         candidate->is_new = false; /* consumed */
                         matched = true;
                         break;
                     }
                 }
                 if (!matched) {
-                    emit_event(target, SWATCHER_EVENT_DELETED, snap->path);
+                    emit_event(sw, target, SWATCHER_EVENT_DELETED, snap->path, false, NULL);
                 }
                 HASH_DEL(tp->snapshots, snap);
                 snapshot_free(snap);
@@ -230,7 +341,7 @@ static void poll_scan_target(swatcher_target_poll *tp)
     /* Emit CREATED for remaining unmatched new entries */
     HASH_ITER(hh, tp->snapshots, snap, tmp) {
         if (snap->is_new) {
-            emit_event(target, SWATCHER_EVENT_CREATED, snap->path);
+            emit_event(sw, target, SWATCHER_EVENT_CREATED, snap->path, false, NULL);
             snap->is_new = false;
         }
     }
@@ -242,6 +353,11 @@ static void initial_scan_path(swatcher_target_poll *tp, const char *dir_path, bo
 {
     swatcher_target *target = tp->target;
     swatcher_target_internal *ti = SW_TARGET_INTERNAL(target);
+
+    /* Note: we intentionally do NOT populate dir_mtime cache here.
+     * The first poll_scan_target cycle will do a full scan and populate
+     * the cache, ensuring no events are missed due to second-resolution
+     * mtime granularity on some filesystems. */
 
     sw_dir *dir = sw_dir_open(dir_path);
     if (!dir) return;
@@ -302,7 +418,7 @@ static void poll_initial_snapshot(swatcher_target_poll *tp)
 
 static bool poll_init(swatcher *sw)
 {
-    swatcher_poll *p = malloc(sizeof(swatcher_poll));
+    swatcher_poll *p = sw_malloc(sizeof(swatcher_poll));
     if (!p) {
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_poll");
         return false;
@@ -321,10 +437,10 @@ static void poll_destroy(swatcher *sw)
     HASH_ITER(hh, p->targets, current, tmp) {
         snapshots_clear(current);
         HASH_DEL(p->targets, current);
-        free(current);
+        sw_free(current);
     }
 
-    free(p);
+    sw_free(p);
     SW_INTERNAL(sw)->backend_data = NULL;
 }
 
@@ -338,7 +454,7 @@ static bool poll_add_target(swatcher *sw, swatcher_target *target)
         return false;
     }
 
-    swatcher_target_poll *tp = malloc(sizeof(swatcher_target_poll));
+    swatcher_target_poll *tp = sw_malloc(sizeof(swatcher_target_poll));
     if (!tp) {
         sw_set_error(SWATCHER_ERR_ALLOC);
         SWATCHER_LOG_DEFAULT_ERROR("Failed to allocate swatcher_target_poll");
@@ -346,6 +462,7 @@ static bool poll_add_target(swatcher *sw, swatcher_target *target)
     }
     tp->target = target;
     tp->snapshots = NULL;
+    tp->dir_mtimes = NULL;
 
     /* Take initial snapshot (no events emitted) */
     poll_initial_snapshot(tp);
@@ -360,7 +477,7 @@ static bool poll_add_target(swatcher *sw, swatcher_target *target)
             SWATCHER_LOG_DEFAULT_ERROR("Failed to create target internal");
             snapshots_clear(tp);
             HASH_DEL(p->targets, tp);
-            free(tp);
+            sw_free(tp);
             return false;
         }
     }
@@ -381,7 +498,7 @@ static bool poll_remove_target(swatcher *sw, swatcher_target *target)
     if (tp) {
         snapshots_clear(tp);
         HASH_DEL(p->targets, tp);
-        free(tp);
+        sw_free(tp);
         ti->backend_data = NULL;
     }
 
@@ -419,7 +536,7 @@ static void *poll_thread_func(void *arg)
 
         swatcher_target_poll *tp, *tmp;
         HASH_ITER(hh, p->targets, tp, tmp) {
-            poll_scan_target(tp);
+            poll_scan_target(sw, tp);
         }
 
         sw_mutex_unlock(si->mutex);

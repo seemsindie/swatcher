@@ -47,6 +47,9 @@ jobs:
       - name: Test (backend_select)
         run: ${{ runner.os == 'Windows' && 'build\\Debug\\test_backend_select.exe' || './build/test_backend_select' }}
 
+      - name: Test (allocator)
+        run: ${{ runner.os == 'Windows' && 'build\\Debug\\test_allocator.exe' || './build/test_allocator' }}
+
       # --- Linux-only tests ---
       - name: Test (inotify)
         if: runner.os == 'Linux'
@@ -111,6 +114,29 @@ jobs:
 
       - name: Test
         run: zig build test-zig
+
+  # ── FreeBSD tests ────────────────────────────────────────────────
+  test-freebsd:
+    runs-on: ubuntu-latest
+    name: Test (FreeBSD)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test on FreeBSD
+        uses: cross-platform-actions/action@v0.25.0
+        with:
+          operating_system: freebsd
+          version: '14.1'
+          run: |
+            sudo pkg install -y cmake
+            cmake -B build -DCMAKE_BUILD_TYPE=Debug
+            cmake --build build --config Debug
+            ./build/test_pattern
+            ./build/test_platform
+            ./build/test_poll
+            ./build/test_error
+            ./build/test_backend_select
+            ./build/test_kqueue
 
   # ── Release artifacts ─────────────────────────────────────────────
   release:

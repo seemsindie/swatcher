@@ -1,5 +1,6 @@
 #include "pattern.h"
 #include "../../include/swatcher.h"
+#include "../internal/alloc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -84,12 +85,12 @@ sw_compiled_patterns *sw_patterns_compile(char **source)
     while (source[count] != NULL)
         count++;
 
-    sw_compiled_patterns *cp = malloc(sizeof(sw_compiled_patterns));
+    sw_compiled_patterns *cp = sw_malloc(sizeof(sw_compiled_patterns));
     if (!cp) return NULL;
 
-    cp->patterns = malloc(sizeof(re_t) * count);
+    cp->patterns = sw_malloc(sizeof(re_t) * count);
     if (!cp->patterns) {
-        free(cp);
+        sw_free(cp);
         return NULL;
     }
     cp->count = count;
@@ -112,8 +113,8 @@ sw_compiled_patterns *sw_patterns_compile(char **source)
             /* Free already-compiled patterns */
             for (size_t j = 0; j < i; j++)
                 re_free(cp->patterns[j]);
-            free(cp->patterns);
-            free(cp);
+            sw_free(cp->patterns);
+            sw_free(cp);
             return NULL;
         }
     }
@@ -126,8 +127,8 @@ void sw_patterns_free(sw_compiled_patterns *cp)
     if (!cp) return;
     for (size_t i = 0; i < cp->count; i++)
         re_free(cp->patterns[i]);
-    free(cp->patterns);
-    free(cp);
+    sw_free(cp->patterns);
+    sw_free(cp);
 }
 
 bool sw_pattern_matched(const sw_compiled_patterns *cp, const char *string)

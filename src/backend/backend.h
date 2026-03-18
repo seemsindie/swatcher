@@ -16,9 +16,11 @@ typedef struct swatcher_backend {
 
 /* Backend constructors — only the platform-relevant one is defined */
 const swatcher_backend *swatcher_backend_inotify(void);
+const swatcher_backend *swatcher_backend_fanotify(void);
 const swatcher_backend *swatcher_backend_fsevents(void);
 const swatcher_backend *swatcher_backend_win32(void);
 const swatcher_backend *swatcher_backend_kqueue(void);
+const swatcher_backend *swatcher_backend_uring(void);
 const swatcher_backend *swatcher_backend_poll(void);
 const swatcher_backend *swatcher_backend_default(void);
 
