@@ -103,8 +103,11 @@ static void test_inotify_backend_by_name(void)
     swatcher *sw = malloc(sizeof(swatcher));
     assert(sw != NULL);
 
-#if defined(__linux__) || defined(__unix__)
+#if defined(__linux__)
     assert(swatcher_init_with_backend(sw, &config, "inotify"));
+    swatcher_cleanup(sw);
+#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+    assert(swatcher_init_with_backend(sw, &config, "kqueue"));
     swatcher_cleanup(sw);
 #endif
 
