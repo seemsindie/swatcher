@@ -193,7 +193,7 @@ bool sw_stat(const char *path, sw_file_info *info, bool follow_symlinks)
         info->mtime = 0;
     }
 
-    free(wide_path);
+    sw_free(wide_path);
     return true;
 }
 

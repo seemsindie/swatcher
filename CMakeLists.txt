@@ -136,7 +136,7 @@ add_executable(bench_poll tests/bench_poll.c)
 target_link_libraries(bench_poll swatcher)
 
 # inotify backend tests (Linux only)
-if(NOT WIN32 AND NOT APPLE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(test_inotify tests/test_inotify.c)
     target_link_libraries(test_inotify swatcher)
 

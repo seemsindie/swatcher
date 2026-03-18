@@ -157,6 +157,7 @@ static void test_custom_allocator_called(void)
 
     /* Every allocation should have a matching free */
     printf("[allocs=%d frees=%d bytes=%zu] ", alloc_count, free_count, total_allocated);
+    fflush(stdout);
     assert(alloc_count == free_count);
 
     remove_test_dir();
