@@ -136,6 +136,7 @@ jobs:
             ./build/test_poll
             ./build/test_error
             ./build/test_backend_select
+            ./build/test_allocator
             ./build/test_kqueue
 
   # ── Release artifacts ─────────────────────────────────────────────
@@ -217,6 +218,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          gh release delete ${GITHUB_REF_NAME} --yes 2>/dev/null || true
           gh release create ${GITHUB_REF_NAME} \
             --title "swatcher ${GITHUB_REF_NAME}" \
             --generate-notes \

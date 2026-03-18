@@ -16,6 +16,8 @@ static const backend_entry backends[] = {
 #if defined(__APPLE__)
     { "kqueue",   swatcher_backend_kqueue },
     { "fsevents", swatcher_backend_fsevents },
+#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+    { "kqueue",   swatcher_backend_kqueue },
 #endif
 #if defined(_WIN32)
     { "win32",    swatcher_backend_win32 },
