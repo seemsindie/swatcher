@@ -1,6 +1,7 @@
 #ifndef SWATCHER_TYPES_H
 #define SWATCHER_TYPES_H
 
+#include "swatcher_version.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>

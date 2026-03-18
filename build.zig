@@ -20,9 +20,15 @@ pub fn build(b: *std.Build) void {
             "src/core/target.c",
             "src/core/pattern.c",
             "src/core/error.c",
+            "src/core/rescan.c",
+            "src/core/vcs.c",
             "src/regex/re.c",
+            "src/internal/alloc.c",
+            "src/internal/pool.c",
             "src/backend/backend_poll.c",
             "src/backend/backend_registry.c",
+            "src/backend/backend_fanotify.c",
+            "src/backend/backend_uring.c",
             "src/platform/platform_posix.c",
             "src/backend/backend_inotify.c",
         },
@@ -35,7 +41,21 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Generate swatcher_version.h (equivalent to CMake's configure_file)
+    const version_h = b.addWriteFiles();
+    _ = version_h.add("swatcher_version.h",
+        \\#ifndef SWATCHER_VERSION_H
+        \\#define SWATCHER_VERSION_H
+        \\#define SWATCHER_VERSION_MAJOR 0
+        \\#define SWATCHER_VERSION_MINOR 1
+        \\#define SWATCHER_VERSION_PATCH 0
+        \\#define SWATCHER_VERSION "0.1.0"
+        \\#endif
+        \\
+    );
+
     c_mod.addIncludePath(b.path("include"));
+    c_mod.addIncludePath(version_h.getDirectory());
     c_mod.addIncludePath(b.path("src"));
     c_mod.linkSystemLibrary("pthread", .{});
 
@@ -54,6 +74,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     swatcher_mod.addIncludePath(b.path("include"));
+    swatcher_mod.addIncludePath(version_h.getDirectory());
     swatcher_mod.addIncludePath(b.path("src"));
     swatcher_mod.linkLibrary(lib);
 

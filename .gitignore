@@ -3,3 +3,5 @@ build/*
 .cache/
 .zig-cache/
 zig-out/
+swatcher_version.h
+swatcher.pc

@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.20.0)
 project(swatcher VERSION 0.1.0 LANGUAGES C)
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/swatcher_version.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/include/swatcher_version.h"
+    @ONLY
+)
+
 option(BUILD_SHARED_LIBS "Build using shared libraries" OFF)
 
 # C11 standard
@@ -51,8 +60,17 @@ add_library(swatcher
     ${BACKEND_SOURCES}
 )
 
-target_include_directories(swatcher PUBLIC include)
+target_include_directories(swatcher PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
 target_include_directories(swatcher PRIVATE src)
+
+set_target_properties(swatcher PROPERTIES
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+)
 
 if(BUILD_SHARED_LIBS)
     target_compile_definitions(swatcher PRIVATE SWATCHER_BUILD_DLL=1)
@@ -94,7 +112,7 @@ target_link_libraries(live_reload swatcher)
 
 # Pattern tests
 add_executable(test_pattern tests/test_pattern.c src/core/pattern.c src/regex/re.c src/core/log.c src/internal/alloc.c)
-target_include_directories(test_pattern PRIVATE include src)
+target_include_directories(test_pattern PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}/include" src)
 
 # Platform tests
 if(WIN32)
@@ -103,7 +121,7 @@ else()
     set(TEST_PLATFORM_SOURCES src/platform/platform_posix.c)
 endif()
 add_executable(test_platform tests/test_platform.c ${TEST_PLATFORM_SOURCES} src/internal/alloc.c)
-target_include_directories(test_platform PRIVATE include src)
+target_include_directories(test_platform PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}/include" src)
 if(NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(test_platform PRIVATE Threads::Threads)
@@ -172,9 +190,59 @@ if(CMAKE_CXX_COMPILER)
     )
 endif()
 
-# Install headers
-install(FILES include/swatcher.h include/swatcher_types.h include/swatcher.hpp
-        DESTINATION include)
+# --- Install ---
+
+install(TARGETS swatcher
+    EXPORT swatcherTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(FILES
+    include/swatcher.h
+    include/swatcher_types.h
+    include/swatcher.hpp
+    include/uthash.h
+    "${CMAKE_CURRENT_BINARY_DIR}/include/swatcher_version.h"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# pkg-config
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/swatcher.pc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/swatcher.pc"
+    @ONLY
+)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/swatcher.pc"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+)
+
+# CMake find_package support
+install(EXPORT swatcherTargets
+    FILE swatcherTargets.cmake
+    NAMESPACE swatcher::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/swatcher
+)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/swatcherConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/swatcherConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/swatcherConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/swatcher
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/swatcherConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/swatcherConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/swatcher
+)
+
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
 include(CPack)

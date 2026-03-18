@@ -72,6 +72,28 @@ cd bindings/zig
 zig build
 ```
 
+## Installing
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+cmake --install build                       # system-wide (may need sudo)
+cmake --install build --prefix ~/.local     # user-local
+```
+
+### CMake `find_package`
+
+```cmake
+find_package(swatcher 0.1.0 REQUIRED)
+target_link_libraries(myapp swatcher::swatcher)
+```
+
+### pkg-config
+
+```bash
+gcc -o myapp myapp.c $(pkg-config --cflags --libs swatcher)
+```
+
 ## API Reference
 
 ### Convenience API (recommended)

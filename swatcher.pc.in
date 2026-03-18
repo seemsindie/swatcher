@@ -1,0 +1,9 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: swatcher
+Description: Cross-platform file system watching library in pure C
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lswatcher
+Cflags: -I${includedir}
