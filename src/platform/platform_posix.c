@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/types.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <limits.h>

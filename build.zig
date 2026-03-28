@@ -12,6 +12,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const is_darwin = target.result.os.tag.isDarwin();
+
     c_mod.addCSourceFiles(.{
         .files = &.{
             "src/core/swatcher.c",
@@ -27,12 +29,14 @@ pub fn build(b: *std.Build) void {
             "src/internal/pool.c",
             "src/backend/backend_poll.c",
             "src/backend/backend_registry.c",
-            "src/backend/backend_fanotify.c",
-            "src/backend/backend_uring.c",
             "src/platform/platform_posix.c",
-            "src/backend/backend_inotify.c",
         },
-        .flags = &.{
+        .flags = if (is_darwin) &.{
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-D_DARWIN_C_SOURCE",
+        } else &.{
             "-std=c11",
             "-Wall",
             "-Wextra",
@@ -40,6 +44,41 @@ pub fn build(b: *std.Build) void {
             "-D_POSIX_C_SOURCE=200809L",
         },
     });
+
+    // Linux-only backends
+    if (target.result.os.tag == .linux) {
+        c_mod.addCSourceFiles(.{
+            .files = &.{
+                "src/backend/backend_inotify.c",
+                "src/backend/backend_fanotify.c",
+                "src/backend/backend_uring.c",
+            },
+            .flags = &.{
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-D_DEFAULT_SOURCE",
+                "-D_POSIX_C_SOURCE=200809L",
+            },
+        });
+    }
+
+    // macOS/BSD backends
+    if (is_darwin) {
+        c_mod.addCSourceFiles(.{
+            .files = &.{
+                "src/backend/backend_fsevents.c",
+                "src/backend/backend_kqueue.c",
+            },
+            .flags = &.{
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-D_DARWIN_C_SOURCE",
+            },
+        });
+        c_mod.linkFramework("CoreServices", .{});
+    }
 
     // Generate swatcher_version.h (equivalent to CMake's configure_file)
     const version_h = b.addWriteFiles();
